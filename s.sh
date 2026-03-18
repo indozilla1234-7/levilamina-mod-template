@@ -1,3 +1,3 @@
 git add .
-git commit -m "Add GitHub Actions workflow for Windows build"
+git commit -m "Fix xmake path in GitHub Actions"
 git push origin main

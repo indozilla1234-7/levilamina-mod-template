@@ -1,7 +1,15 @@
 #include "mod/MyMod.h"
 #include "ll/api/mod/RegisterHelper.h"
 #include "modmorpher.h"
-#include <dlfcn.h>  // Linux library loader
+#include <string>
+
+// Platform-specific includes
+#ifdef _WIN32
+    #include <windows.h>  // Windows library loader
+#else
+    #include <dlfcn.h>    // Linux library loader
+#endif
+
 #include "jni.h"    // Your uploaded JNI header
 
 namespace my_mod {
@@ -21,6 +29,25 @@ bool MyMod::load() {
     // ===== STEP 1: Load JVM =====
     getSelf().getLogger().info("Step 1: Loading JVM...");
     
+#ifdef _WIN32
+    // Windows: Use LoadLibrary for .dll files
+    const char* libPath = "./plugins/MyMod/jvm.dll";
+    HMODULE handle = LoadLibraryA(libPath);
+    if (!handle) {
+        DWORD error = GetLastError();
+        getSelf().getLogger().error("Failed to load jvm.dll! Error code: " + std::to_string(error));
+        return false;
+    }
+
+    typedef jint (*CreateJVM)(JavaVM**, void**, void*);
+    auto JNI_CreateJavaVM_ptr = (CreateJVM)GetProcAddress(handle, "JNI_CreateJavaVM");
+    if (!JNI_CreateJavaVM_ptr) {
+        getSelf().getLogger().error("Could not find JNI_CreateJavaVM in the dll file!");
+        FreeLibrary(handle);
+        return false;
+    }
+#else
+    // Linux: Use dlopen for .so files
     const char* libPath = "./plugins/MyMod/libjvm.so"; 
     void* handle = dlopen(libPath, RTLD_NOW);
     if (!handle) {
@@ -34,6 +61,7 @@ bool MyMod::load() {
         getSelf().getLogger().error("Could not find JNI_CreateJavaVM in the .so file!");
         return false;
     }
+#endif
 
     JavaVMInitArgs vm_args;
     JavaVMOption options[1];

@@ -26,17 +26,29 @@
 #ifndef _JAVASOFT_JNI_MD_H_
 #define _JAVASOFT_JNI_MD_H_
 
-#define JNIEXPORT     __attribute__((visibility("default")))
-#define JNIIMPORT     __attribute__((visibility("default")))
-#define JNICALL
-
-typedef int jint;
-#ifdef _LP64 /* 64-bit */
-typedef long jlong;
+#ifdef _WIN32
+    /* Windows/MSVC specific definitions */
+    #define JNIEXPORT __declspec(dllexport)
+    #define JNIIMPORT __declspec(dllimport)
+    #define JNICALL   __stdcall
+    
+    typedef int jint;
+    typedef __int64 jlong;
+    typedef signed char jbyte;
 #else
-typedef long long jlong;
+    /* Linux/GCC specific definitions */
+    #define JNIEXPORT     __attribute__((visibility("default")))
+    #define JNIIMPORT     __attribute__((visibility("default")))
+    #define JNICALL
+    
+    typedef int jint;
+    #ifdef _LP64 /* 64-bit */
+    typedef long jlong;
+    #else
+    typedef long long jlong;
+    #endif
+    
+    typedef signed char jbyte;
 #endif
-
-typedef signed char jbyte;
 
 #endif /* !_JAVASOFT_JNI_MD_H_ */
