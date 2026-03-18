@@ -1,0 +1,81 @@
+#pragma once
+
+#include "mc/_HeaderOutputPredefine.h"
+
+// auto generated inclusion list
+#include "mc/network/MinecraftPacketIds.h"
+#include "mc/network/Packet.h"
+#include "mc/platform/Result.h"
+#include "mc/world/level/biome/serialization/BiomeStringList.h"
+
+// auto generated forward declare list
+// clang-format off
+class BinaryStream;
+class ReadOnlyBinaryStream;
+struct BiomeDefinitionData;
+// clang-format on
+
+class BiomeDefinitionListPacket : public ::Packet {
+public:
+    // member variables
+    // NOLINTBEGIN
+    ::ll::TypedStorage<8, 64, ::std::unordered_map<ushort, ::BiomeDefinitionData>> mBiomeData;
+    ::ll::TypedStorage<8, 88, ::BiomeStringList>                                   mStringList;
+    // NOLINTEND
+
+public:
+    // virtual functions
+    // NOLINTBEGIN
+    virtual ::MinecraftPacketIds getId() const /*override*/;
+
+    virtual ::std::string getName() const /*override*/;
+
+    virtual void write(::BinaryStream& stream) const /*override*/;
+
+    virtual ::Bedrock::Result<void> read(::ReadOnlyBinaryStream& stream) /*override*/;
+
+    virtual ::Bedrock::Result<void> _read(::ReadOnlyBinaryStream& stream) /*override*/;
+
+    virtual ~BiomeDefinitionListPacket() /*override*/;
+    // NOLINTEND
+
+public:
+    // member functions
+    // NOLINTBEGIN
+    MCAPI BiomeDefinitionListPacket();
+    // NOLINTEND
+
+public:
+    // constructor thunks
+    // NOLINTBEGIN
+    MCAPI void* $ctor();
+    // NOLINTEND
+
+public:
+    // destructor thunk
+    // NOLINTBEGIN
+    MCAPI void $dtor();
+    // NOLINTEND
+
+public:
+    // virtual function thunks
+    // NOLINTBEGIN
+    MCAPI ::MinecraftPacketIds $getId() const;
+
+    MCAPI ::std::string $getName() const;
+
+    MCAPI void $write(::BinaryStream& stream) const;
+
+    MCAPI ::Bedrock::Result<void> $read(::ReadOnlyBinaryStream& stream);
+
+    MCFOLD ::Bedrock::Result<void> $_read(::ReadOnlyBinaryStream& stream);
+
+
+    // NOLINTEND
+
+public:
+    // vftables
+    // NOLINTBEGIN
+    MCNAPI static void** $vftable();
+    // NOLINTEND
+};
