@@ -1,0 +1,65 @@
+{
+  "description": "Forge to Bedrock Block State Mappings",
+  "version": "1.0",
+  
+  "blockNames": {
+    "minecraft:stone": "minecraft:stone",
+    "minecraft:granite": "minecraft:granite",
+    "minecraft:chest": "minecraft:chest",
+    "minecraft:oak_log": "minecraft:oak_log",
+    "minecraft:oak_leaves": "minecraft:oak_leaves",
+    "minecraft:water": "minecraft:flowing_water",
+    "minecraft:lava": "minecraft:flowing_lava",
+    "minecraft:dirt": "minecraft:dirt",
+    "minecraft:grass_block": "minecraft:grass",
+    "minecraft:sand": "minecraft:sand",
+    "minecraft:oak_door": "minecraft:wooden_door",
+    "minecraft:iron_door": "minecraft:iron_door",
+    "minecraft:oak_stairs": "minecraft:oak_stairs",
+    "minecraft:oak_fence": "minecraft:oak_fence"
+  },
+
+  "propertyMappings": {
+    "minecraft:chest": {
+      "facing": "direction",
+      "type": "variant",
+      "waterlogged": "waterlogged"
+    },
+    "minecraft:oak_log": {
+      "axis": "pillar_axis"
+    },
+    "minecraft:oak_stairs": {
+      "facing": "facing",
+      "half": "half",
+      "shape": "stair_shape",
+      "waterlogged": "waterlogged"
+    },
+    "minecraft:oak_fence": {
+      "east": "connected_east",
+      "west": "connected_west",
+      "north": "connected_north",
+      "south": "connected_south",
+      "waterlogged": "waterlogged"
+    },
+    "minecraft:oak_door": {
+      "facing": "direction",
+      "half": "upper_block_bit",
+      "hinge": "door_hinge_bit",
+      "open": "open_bit",
+      "powered": "powered_bit"
+    },
+    "minecraft:flowing_water": {
+      "level": "liquid_depth"
+    },
+    "minecraft:flowing_lava": {
+      "level": "liquid_depth"
+    }
+  },
+
+  "notes": [
+    "Forge uses string properties like 'facing=north', 'half=upper'",
+    "Bedrock uses direct property names and sometimes boolean bits",
+    "Some Forge blocks don't have direct Bedrock equivalents",
+    "Add custom mappings as needed for your mod"
+  ]
+}

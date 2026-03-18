@@ -1,0 +1,86 @@
+name: Build Windows DLL
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    strategy:
+      matrix:
+        target_type: [server, client]
+        build_mode: [release]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install xmake
+        run: |
+          choco install xmake -y
+          refreshenv
+      
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      
+      - name: Configure xmake
+        run: |
+          xmake f -p windows -a x86_64 --target_type=${{ matrix.target_type }} -m ${{ matrix.build_mode }} -y
+      
+      - name: Build mod
+        run: xmake
+      
+      - name: List build output
+        run: |
+          dir build\windows\x86_64\${{ matrix.build_mode }}\
+          dir build\windows\x86_64\${{ matrix.build_mode }}\*.dll
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: levilamina-mod-${{ matrix.target_type }}-${{ matrix.build_mode }}
+          path: build/windows/x86_64/${{ matrix.build_mode }}/*.dll
+          if-no-files-found: warn
+      
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            build/windows/x86_64/${{ matrix.build_mode }}/*.dll
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-linux:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install xmake
+        run: |
+          curl -fsSL https://xmake.io/shget.text | bash
+      
+      - name: Configure xmake for Linux
+        run: |
+          xmake f -p linux -a x86_64 --target_type=server -m release -y
+      
+      - name: Build mod
+        run: xmake
+      
+      - name: List build output
+        run: |
+          find build -name "*.so" -o -name "*.a"
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: levilamina-mod-linux
+          path: build/linux/x86_64/release/
+          if-no-files-found: warn

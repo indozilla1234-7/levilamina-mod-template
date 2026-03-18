@@ -1,0 +1,28 @@
+# Windows Docker image for building LeviLamina mods
+# Requires Docker with Windows containers enabled
+FROM mcr.microsoft.com/windows/servercore:ltsc2022
+
+# Install Chocolatey
+RUN powershell -NoProfile -InputFormat None -Command \
+    "[System.Net.ServicePointManager]::SecurityProtocol = 3072; \
+    iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))" && \
+    refreshenv
+
+# Install build tools
+RUN choco install -y git cmake ninja visualstudio2022buildtools visualstudio2022-workload-nativedesktop
+
+# Install xmake
+RUN choco install -y xmake
+
+# Set working directory
+WORKDIR /workspace
+
+# Copy the mod source
+COPY . .
+
+# Build the mod
+RUN xmake f -p windows -a x86_64 --target_type=server -m release && \
+    xmake
+
+# Output will be in build/windows/x86_64/release/
+CMD ["cmd.exe"]
