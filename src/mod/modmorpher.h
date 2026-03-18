@@ -3,7 +3,7 @@
 #include "jni.h"
 #include <string>
 #include <map>
-#include <memory>
+#include "memory"
 #include <functional>
 #include <vector>
 

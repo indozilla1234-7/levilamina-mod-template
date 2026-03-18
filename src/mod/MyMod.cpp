@@ -1,6 +1,7 @@
 #include "mod/MyMod.h"
 #include "ll/api/mod/RegisterHelper.h"
 #include "modmorpher.h"
+#include "ll/api/memory/Memory.h"
 #include <string>
 
 // Platform-specific includes
@@ -11,6 +12,7 @@
 #endif
 
 #include "jni.h"    // Your uploaded JNI header
+LL_SHARED_MEMORY_OPERATOR
 
 namespace my_mod {
 
