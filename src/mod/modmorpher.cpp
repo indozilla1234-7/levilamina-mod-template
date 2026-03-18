@@ -271,12 +271,12 @@ bool EntityTracker::hasEntity(JNIEnv* env, jobject javaEntity) {
 // ============================================================================
 
 JNINativeMethod NativeShadowAdapter::nativeMethods[] = {
-    {"setPos", "(DDD)V", (void*)&NativeShadowAdapter::nativeEntitySetPos},
-    {"getPos", "()[D", (void*)&NativeShadowAdapter::nativeEntityGetPos},
-    {"addTag", "(Ljava/lang/String;)V", (void*)&NativeShadowAdapter::nativeEntityAddTag},
-    {"setBlock", "(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/BlockState;I)Z",
+    {(char*)"setPos", (char*)"(DDD)V", (void*)&NativeShadowAdapter::nativeEntitySetPos},
+    {(char*)"getPos", (char*)"()[D", (void*)&NativeShadowAdapter::nativeEntityGetPos},
+    {(char*)"addTag", (char*)"(Ljava/lang/String;)V", (void*)&NativeShadowAdapter::nativeEntityAddTag},
+    {(char*)"setBlock", (char*)"(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/BlockState;I)Z",
      (void*)&NativeShadowAdapter::nativeBlockSetBlock},
-    {"getBlock", "(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/BlockState;",
+    {(char*)"getBlock", (char*)"(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/BlockState;",
      (void*)&NativeShadowAdapter::nativeBlockGetBlock},
 };
 
