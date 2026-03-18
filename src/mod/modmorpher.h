@@ -30,6 +30,7 @@ namespace modmorpher {
  */
 class BedrockSymbolResolver {
 public:
+    static std::vector<jobject> registeredForgeListeners;
     // Function pointer types
     using ActorSetPos = void(*)(void* actor, const void* vec3);
     using ActorGetPos = void(*)(void* actor, void* outVec3);
@@ -84,6 +85,7 @@ private:
  */
 class JNIThreadManager {
 public:
+    static std::vector<jobject> registeredForgeListeners;
     /**
      * Set the cached JVM for thread management
      */
@@ -109,6 +111,7 @@ public:
      */
     class ThreadGuard {
     public:
+    static std::vector<jobject> registeredForgeListeners;
         ThreadGuard();
         ~ThreadGuard();
         JNIEnv* getEnv();
@@ -131,6 +134,7 @@ private:
  */
 class BlockStateMapper {
 public:
+    static std::vector<jobject> registeredForgeListeners;
     struct ForgeBlockState {
         std::string name;
         std::map<std::string, std::string> properties;
@@ -176,6 +180,7 @@ private:
  */
 class EntityTracker {
 public:
+    static std::vector<jobject> registeredForgeListeners;
     /**
      * Map a Java entity jobject to a Bedrock actor pointer
      * Extracts unique ID from Java object for safe key storage
@@ -221,6 +226,7 @@ private:
  */
 class NativeShadowAdapter {
 public:
+    static std::vector<jobject> registeredForgeListeners;
     /**
      * Register all native methods with JVM
      */
@@ -265,6 +271,7 @@ private:
  */
 class BedrockPointerHelper {
 public:
+    static std::vector<jobject> registeredForgeListeners;
     /**
      * Vector3 type for Bedrock
      */
@@ -309,6 +316,7 @@ public:
  */
 class ForgeEventForwarder {
 public:
+    static std::vector<jobject> registeredForgeListeners;
     using PlayerEventHandler = std::function<void(const std::string&)>;
     using BlockEventHandler = std::function<void(int, int, int, const std::string&)>;
 
@@ -338,7 +346,6 @@ private:
     static std::vector<PlayerEventHandler> playerLeaveHandlers;
     static std::vector<BlockEventHandler> blockBreakHandlers;
     static std::vector<BlockEventHandler> blockPlaceHandlers;
-    static std::vector<jobject> registeredForgeListeners;
 };
 
 // ============================================================================
@@ -350,6 +357,7 @@ private:
  */
 class ModMorpher {
 public:
+    static std::vector<jobject> registeredForgeListeners;
     /**
      * Initialize ModMorpher with JVM
      * Call this from MyMod::load() after JVM is created
