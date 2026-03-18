@@ -12,7 +12,7 @@
 #endif
 
 #include "jni.h"    // Your uploaded JNI header
-LL_SHARED_MEMORY_OPERATOR
+LL_SHARED_MEMORY_OPERATOR;
 
 namespace my_mod {
 
