@@ -20,3 +20,4 @@ else
     echo "Please install xmake first: bash setup.sh"
     exit 1
 fi
+ 
