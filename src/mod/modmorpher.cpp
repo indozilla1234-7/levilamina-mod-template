@@ -14,21 +14,21 @@
 // ============================================================================
 #include "ll/api/event/EventBus.h"
 #include "ll/api/event/player/PlayerJoinEvent.h"
-#include "ll/api/event/player/PlayerLeaveEvent.h"
+#include "ll/api/event/player/PlayerDisconnectEvent.h"
 #include "ll/api/event/player/PlayerDestroyBlockEvent.h"
-#include "ll/api/event/player/PlayerPlacingBlockEvent.h"
+#include "ll/api/event/player/PlayerPlaceBlockEvent.h"
 #include "ll/api/event/player/PlayerAttackEvent.h"
 #include "ll/api/event/player/PlayerChatEvent.h"
 #include "ll/api/event/player/PlayerDieEvent.h"
 #include "ll/api/event/player/PlayerRespawnEvent.h"
 #include "ll/api/event/player/PlayerInteractBlockEvent.h"
 #include "ll/api/event/player/PlayerPickUpItemEvent.h"
-#include "ll/api/event/entity/EntityDieEvent.h"
-#include "ll/api/event/entity/EntityHurtEvent.h"
-#include "ll/api/event/world/ChunkLoadedEvent.h"
+#include "ll/api/event/entity/MobDieEvent.h"
+#include "ll/api/event/entity/ActorHurtEvent.h"
 #include "ll/api/event/world/SpawnMobEvent.h"
+#include "ll/api/event/world/LevelTickEvent.h"
 #include "ll/api/event/server/ServerStartedEvent.h"
-#include "ll/api/event/server/ServerStoppedEvent.h"
+#include "ll/api/event/server/ServerStoppingEvent.h"
 #include "ll/api/memory/Hook.h"
 #include "ll/api/memory/Memory.h"
 #include "ll/api/command/CommandHandle.h"
@@ -44,8 +44,6 @@ namespace modmorpher {
 
 // ============================================================================
 // ASYNC JNI CALL QUEUE
-// Bedrock ticks on a tight loop — we never want JNI calls stalling it.
-// Heavy Java work is pushed here and drained on a dedicated thread.
 // ============================================================================
 
 struct JNICall {
@@ -61,7 +59,6 @@ static std::thread          gJNIWorkerThread;
 static void jniWorkerLoop() {
     auto& logger = my_mod::MyMod::getInstance().getSelf().getLogger();
     logger.info("JNI worker thread started");
-
     while (gJNIWorkerRunning) {
         std::unique_lock<std::mutex> lock(gJNIQueueMutex);
         if (gJNIQueue.empty()) {
@@ -72,14 +69,10 @@ static void jniWorkerLoop() {
         JNICall call = std::move(gJNIQueue.front());
         gJNIQueue.pop();
         lock.unlock();
-
         JNIThreadManager::ThreadGuard guard;
         JNIEnv* env = guard.getEnv();
-        if (env) {
-            call.fn(env);
-        } else {
-            logger.error("JNI worker: no env for call: " + call.description);
-        }
+        if (env) call.fn(env);
+        else logger.error("JNI worker: no env for call: " + call.description);
     }
     logger.info("JNI worker thread stopped");
 }
@@ -128,7 +121,6 @@ bool BedrockSymbolResolver::initialize() {
         if (*s.target) { ok++; logger.info("  [OK] " + std::string(s.name)); }
         else             logger.warn("  [!!] " + std::string(s.name));
     }
-
     logger.info("ModMorpher: " + std::to_string(ok) + "/" +
                 std::to_string(sizeof(symbols)/sizeof(symbols[0])) + " symbols resolved");
     resolved = true;
@@ -161,10 +153,7 @@ bool JNIThreadManager::ensureAttached() {
     if (threadEnv) return true;
     if (!jvm) return false;
     jint r = jvm->AttachCurrentThread((void**)&threadEnv, nullptr);
-    if (r != JNI_OK) {
-        threadEnv = nullptr;
-        return false;
-    }
+    if (r != JNI_OK) { threadEnv = nullptr; return false; }
     return true;
 }
 
@@ -185,18 +174,16 @@ JNIEnv* JNIThreadManager::ThreadGuard::getEnv() { return threadEnv; }
 
 // ============================================================================
 // JAVA CLASS CACHE
-// Avoids FindClass overhead on every event by caching jclass + method IDs
 // ============================================================================
 
 namespace JavaClassCache {
     struct CachedClass {
-        jclass      ref       = nullptr;
-        bool        attempted = false;
+        jclass ref       = nullptr;
+        bool   attempted = false;
     };
-
-    static std::map<std::string, CachedClass>              classes;
-    static std::map<std::string, jmethodID>                methods;
-    static std::mutex                                       cacheMutex;
+    static std::map<std::string, CachedClass> classes;
+    static std::map<std::string, jmethodID>   methods;
+    static std::mutex                          cacheMutex;
 
     jclass getClass(JNIEnv* env, const std::string& name) {
         std::lock_guard<std::mutex> lock(cacheMutex);
@@ -234,7 +221,6 @@ namespace JavaClassCache {
     }
 }
 
-// Helper: fire a static void Java method on the bridge class asynchronously
 static void fireJavaBridge(std::string eventName, std::function<void(JNIEnv*, jclass)> call) {
     enqueueJNICall(eventName, [call = std::move(call)](JNIEnv* env) {
         jclass cls = JavaClassCache::getClass(env, "com/example/mod/ForgeEventBridge");
@@ -247,12 +233,11 @@ static void fireJavaBridge(std::string eventName, std::function<void(JNIEnv*, jc
 // BLOCK STATE MAPPER
 // ============================================================================
 
-std::map<std::string, std::string>                        BlockStateMapper::blockNameMappings;
-std::map<std::string, std::map<std::string,std::string>>  BlockStateMapper::propertyMappings;
+std::map<std::string, std::string>                       BlockStateMapper::blockNameMappings;
+std::map<std::string, std::map<std::string,std::string>> BlockStateMapper::propertyMappings;
 
 bool BlockStateMapper::loadMappings(const std::string&) {
     blockNameMappings = {
-        // Stone
         {"minecraft:stone","minecraft:stone"},{"minecraft:granite","minecraft:stone"},
         {"minecraft:diorite","minecraft:stone"},{"minecraft:andesite","minecraft:stone"},
         {"minecraft:cobblestone","minecraft:cobblestone"},
@@ -261,19 +246,16 @@ bool BlockStateMapper::loadMappings(const std::string&) {
         {"minecraft:mossy_stone_bricks","minecraft:stonebrick"},
         {"minecraft:cracked_stone_bricks","minecraft:stonebrick"},
         {"minecraft:chiseled_stone_bricks","minecraft:stonebrick"},
-        // Dirt / Grass
         {"minecraft:dirt","minecraft:dirt"},{"minecraft:coarse_dirt","minecraft:dirt"},
         {"minecraft:grass_block","minecraft:grass"},{"minecraft:podzol","minecraft:podzol"},
         {"minecraft:mycelium","minecraft:mycelium"},{"minecraft:farmland","minecraft:farmland"},
         {"minecraft:dirt_path","minecraft:grass_path"},
-        // Wood logs
         {"minecraft:oak_log","minecraft:log"},{"minecraft:spruce_log","minecraft:log"},
         {"minecraft:birch_log","minecraft:log"},{"minecraft:jungle_log","minecraft:log"},
         {"minecraft:acacia_log","minecraft:log2"},{"minecraft:dark_oak_log","minecraft:log2"},
         {"minecraft:mangrove_log","minecraft:mangrove_log"},
         {"minecraft:cherry_log","minecraft:cherry_log"},
         {"minecraft:bamboo_block","minecraft:bamboo_block"},
-        // Planks
         {"minecraft:oak_planks","minecraft:planks"},
         {"minecraft:spruce_planks","minecraft:planks"},
         {"minecraft:birch_planks","minecraft:planks"},
@@ -283,7 +265,6 @@ bool BlockStateMapper::loadMappings(const std::string&) {
         {"minecraft:mangrove_planks","minecraft:mangrove_planks"},
         {"minecraft:cherry_planks","minecraft:cherry_planks"},
         {"minecraft:bamboo_planks","minecraft:bamboo_planks"},
-        // Leaves
         {"minecraft:oak_leaves","minecraft:leaves"},
         {"minecraft:spruce_leaves","minecraft:leaves"},
         {"minecraft:birch_leaves","minecraft:leaves"},
@@ -292,7 +273,6 @@ bool BlockStateMapper::loadMappings(const std::string&) {
         {"minecraft:dark_oak_leaves","minecraft:leaves2"},
         {"minecraft:mangrove_leaves","minecraft:mangrove_leaves"},
         {"minecraft:cherry_leaves","minecraft:cherry_leaves"},
-        // Ores (overworld)
         {"minecraft:coal_ore","minecraft:coal_ore"},
         {"minecraft:iron_ore","minecraft:iron_ore"},
         {"minecraft:gold_ore","minecraft:gold_ore"},
@@ -301,7 +281,6 @@ bool BlockStateMapper::loadMappings(const std::string&) {
         {"minecraft:lapis_ore","minecraft:lapis_ore"},
         {"minecraft:redstone_ore","minecraft:redstone_ore"},
         {"minecraft:copper_ore","minecraft:copper_ore"},
-        // Ores (deepslate)
         {"minecraft:deepslate_coal_ore","minecraft:deepslate_coal_ore"},
         {"minecraft:deepslate_iron_ore","minecraft:deepslate_iron_ore"},
         {"minecraft:deepslate_gold_ore","minecraft:deepslate_gold_ore"},
@@ -310,11 +289,9 @@ bool BlockStateMapper::loadMappings(const std::string&) {
         {"minecraft:deepslate_lapis_ore","minecraft:deepslate_lapis_ore"},
         {"minecraft:deepslate_redstone_ore","minecraft:deepslate_redstone_ore"},
         {"minecraft:deepslate_copper_ore","minecraft:deepslate_copper_ore"},
-        // Nether ores
         {"minecraft:nether_gold_ore","minecraft:nether_gold_ore"},
         {"minecraft:nether_quartz_ore","minecraft:quartz_ore"},
         {"minecraft:ancient_debris","minecraft:ancient_debris"},
-        // Functional blocks
         {"minecraft:crafting_table","minecraft:crafting_table"},
         {"minecraft:furnace","minecraft:furnace"},
         {"minecraft:blast_furnace","minecraft:blast_furnace"},
@@ -348,7 +325,6 @@ bool BlockStateMapper::loadMappings(const std::string&) {
         {"minecraft:lectern","minecraft:lectern"},
         {"minecraft:beehive","minecraft:beehive"},
         {"minecraft:bee_nest","minecraft:bee_nest"},
-        // Redstone
         {"minecraft:redstone_wire","minecraft:redstone_wire"},
         {"minecraft:redstone_torch","minecraft:redstone_torch"},
         {"minecraft:lever","minecraft:lever"},
@@ -362,22 +338,18 @@ bool BlockStateMapper::loadMappings(const std::string&) {
         {"minecraft:tripwire_hook","minecraft:tripwire_hook"},
         {"minecraft:target","minecraft:target"},
         {"minecraft:lightning_rod","minecraft:lightning_rod"},
-        // Glass
         {"minecraft:glass","minecraft:glass"},
         {"minecraft:glass_pane","minecraft:glass_pane"},
         {"minecraft:tinted_glass","minecraft:tinted_glass"},
-        // Sand / gravel / concrete
         {"minecraft:sand","minecraft:sand"},
         {"minecraft:red_sand","minecraft:sand"},
         {"minecraft:gravel","minecraft:gravel"},
         {"minecraft:white_concrete","minecraft:concrete"},
         {"minecraft:white_concrete_powder","minecraft:concrete_powder"},
-        // Ice
         {"minecraft:ice","minecraft:ice"},
         {"minecraft:packed_ice","minecraft:packed_ice"},
         {"minecraft:blue_ice","minecraft:blue_ice"},
         {"minecraft:frosted_ice","minecraft:frosted_ice"},
-        // Misc terrain
         {"minecraft:snow_block","minecraft:snow"},
         {"minecraft:clay","minecraft:clay"},
         {"minecraft:netherrack","minecraft:netherrack"},
@@ -413,7 +385,6 @@ bool BlockStateMapper::loadMappings(const std::string&) {
         {"minecraft:sculk_sensor","minecraft:sculk_sensor"},
         {"minecraft:amethyst_block","minecraft:amethyst_block"},
         {"minecraft:budding_amethyst","minecraft:budding_amethyst"},
-        // Plants
         {"minecraft:grass","minecraft:tallgrass"},
         {"minecraft:fern","minecraft:tallgrass"},
         {"minecraft:dead_bush","minecraft:deadbush"},
@@ -432,22 +403,19 @@ bool BlockStateMapper::loadMappings(const std::string&) {
         {"minecraft:beetroots","minecraft:beetroot"},
         {"minecraft:melon","minecraft:melon_block"},
         {"minecraft:pumpkin","minecraft:pumpkin"},
-        // Fluids
         {"minecraft:water","minecraft:water"},
         {"minecraft:lava","minecraft:lava"},
-        // Air
         {"minecraft:air","minecraft:air"},
         {"minecraft:cave_air","minecraft:air"},
         {"minecraft:void_air","minecraft:air"},
     };
 
-    // Property remaps (Java prop name -> Bedrock prop name)
-    propertyMappings["minecraft:oak_log"] = {{"axis","pillar_axis"}};
-    propertyMappings["minecraft:stone"]   = {{"stone_type","stone_type"}};
-    propertyMappings["minecraft:dirt"]    = {{"dirt_type","dirt_type"}};
-    propertyMappings["minecraft:piston"]  = {{"facing","facing_direction"},{"extended","extended"}};
-    propertyMappings["minecraft:repeater"]= {{"delay","repeater_delay"},{"facing","direction"},{"powered","powered"}};
-    propertyMappings["minecraft:comparator"]={{"facing","direction"},{"mode","output_subtract_bit"},{"powered","output_lit_bit"}};
+    propertyMappings["minecraft:oak_log"]    = {{"axis","pillar_axis"}};
+    propertyMappings["minecraft:stone"]      = {{"stone_type","stone_type"}};
+    propertyMappings["minecraft:dirt"]       = {{"dirt_type","dirt_type"}};
+    propertyMappings["minecraft:piston"]     = {{"facing","facing_direction"},{"extended","extended"}};
+    propertyMappings["minecraft:repeater"]   = {{"delay","repeater_delay"},{"facing","direction"},{"powered","powered"}};
+    propertyMappings["minecraft:comparator"] = {{"facing","direction"},{"mode","output_subtract_bit"},{"powered","output_lit_bit"}};
 
     auto& logger = my_mod::MyMod::getInstance().getSelf().getLogger();
     logger.info("BlockStateMapper: " + std::to_string(blockNameMappings.size()) + " blocks, " +
@@ -458,7 +426,6 @@ bool BlockStateMapper::loadMappings(const std::string&) {
 std::string BlockStateMapper::mapBlockName(const std::string& forgeName) {
     auto it = blockNameMappings.find(forgeName);
     if (it != blockNameMappings.end()) return it->second;
-    // Passthrough — mod blocks keep their namespaced ID
     return forgeName;
 }
 
@@ -507,9 +474,9 @@ void EntityTracker::registerEntity(JNIEnv* env, jobject javaEntity, void* bedroc
     jlong id = getEntityId(env, javaEntity);
     auto old = entityIdToJavaRefMap.find(id);
     if (old != entityIdToJavaRefMap.end()) env->DeleteGlobalRef(old->second);
-    entityIdToBedrockMap[id]         = bedrockActor;
+    entityIdToBedrockMap[id]          = bedrockActor;
     bedrockToEntityIdMap[bedrockActor] = id;
-    entityIdToJavaRefMap[id]         = env->NewGlobalRef(javaEntity);
+    entityIdToJavaRefMap[id]          = env->NewGlobalRef(javaEntity);
 }
 
 void* EntityTracker::getBedrockActor(JNIEnv* env, jobject javaEntity) {
@@ -600,22 +567,21 @@ void JNICALL NativeShadowAdapter::nativeEntityAddTag(JNIEnv* env, jobject entity
 }
 
 jboolean JNICALL NativeShadowAdapter::nativeBlockSetBlock(JNIEnv* env, jobject, jobject blockPos, jobject blockState, jint) {
-    auto pos  = BedrockPointerHelper::extractBlockPos(env, blockPos);
-    auto bct  = BedrockSymbolResolver::getBlockCreate();
-    auto bst  = BedrockSymbolResolver::getBlockSetType();
+    auto pos = BedrockPointerHelper::extractBlockPos(env, blockPos);
+    auto bct = BedrockSymbolResolver::getBlockCreate();
+    auto bst = BedrockSymbolResolver::getBlockSetType();
     if (!bct || !bst) return JNI_FALSE;
-
-    jclass bsc  = env->GetObjectClass(blockState);
+    jclass bsc   = env->GetObjectClass(blockState);
     jmethodID gt = env->GetMethodID(bsc, "getType", "()Lnet/minecraft/world/level/block/Block;");
-    jobject bo  = env->CallObjectMethod(blockState, gt);
-    jclass bc   = env->GetObjectClass(bo);
+    jobject bo   = env->CallObjectMethod(blockState, gt);
+    jclass bc    = env->GetObjectClass(bo);
     jmethodID gn = env->GetMethodID(bc, "getName", "()Ljava/lang/String;");
-    jstring jn  = (jstring)env->CallObjectMethod(bo, gn);
+    jstring jn   = (jstring)env->CallObjectMethod(bo, gn);
     const char* name = env->GetStringUTFChars(jn, nullptr);
     std::string bedrockName = BlockStateMapper::mapBlockName(name);
     env->ReleaseStringUTFChars(jn, name);
-    env->DeleteLocalRef(bsc); env->DeleteLocalRef(bo); env->DeleteLocalRef(bc); env->DeleteLocalRef(jn);
-
+    env->DeleteLocalRef(bsc); env->DeleteLocalRef(bo);
+    env->DeleteLocalRef(bc);  env->DeleteLocalRef(jn);
     void* block = bct(bedrockName.c_str());
     if (!block) return JNI_FALSE;
     bst(nullptr, pos.x, pos.y, pos.z, block);
@@ -656,8 +622,6 @@ jobject BedrockPointerHelper::createBlockPos(JNIEnv* env, int x, int y, int z) {
 
 // ============================================================================
 // FORGE EVENT FORWARDER
-// Now with: chat, death, respawn, entity hurt, entity die, chunk load,
-// mob spawn, server start/stop — all async via JNI queue
 // ============================================================================
 
 std::vector<ForgeEventForwarder::PlayerEventHandler> ForgeEventForwarder::playerJoinHandlers;
@@ -686,11 +650,10 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
         });
     });
 
-    // --- Player Leave ---
-    bus.emplaceListener<PlayerLeaveEvent>([](PlayerLeaveEvent& ev) {
+    // --- Player Disconnect ---
+    bus.emplaceListener<PlayerDisconnectEvent>([](PlayerDisconnectEvent& ev) {
         std::string uuid = ev.self().getUuid().asString();
         forwardPlayerLeaveEvent(uuid);
-        // Clean up entity tracking
         JNIThreadManager::ThreadGuard guard;
         if (JNIEnv* env = guard.getEnv()) {
             jobject ref = EntityTracker::getJavaEntity(&ev.self());
@@ -721,7 +684,7 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
         });
     });
 
-    // --- Player Death ---
+    // --- Player Die ---
     bus.emplaceListener<PlayerDieEvent>([](PlayerDieEvent& ev) {
         std::string uuid  = ev.self().getUuid().asString();
         std::string cause = std::to_string((int)ev.source().getCause());
@@ -767,7 +730,7 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
     // --- Player Interact Block ---
     bus.emplaceListener<PlayerInteractBlockEvent>([](PlayerInteractBlockEvent& ev) {
         std::string uuid  = ev.self().getUuid().asString();
-        auto& pos         = ev.pos();
+        auto&       pos   = ev.pos();
         std::string block = ev.block().getTypeName();
         fireJavaBridge("PlayerInteractBlock", [uuid, x=pos.x, y=pos.y, z=pos.z, block](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
@@ -797,9 +760,11 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
 
     // --- Block Break ---
     bus.emplaceListener<PlayerDestroyBlockEvent>([](PlayerDestroyBlockEvent& ev) {
-        auto& pos = ev.pos();
+        auto&       pos   = ev.pos();
         std::string uuid  = ev.self().getUuid().asString();
-        std::string block = ev.self().getDimension().getBlockSourceFromMainChunkLoadState().getBlock(pos).getTypeName();
+        std::string block = ev.self().getDimension()
+                              .getBlockSourceFromMainChunkLoadState()
+                              .getBlock(pos).getTypeName();
         forwardBlockBreakEvent(pos.x, pos.y, pos.z, uuid);
         fireJavaBridge("BlockBreak", [uuid, x=pos.x, y=pos.y, z=pos.z, block](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
@@ -813,8 +778,8 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
     });
 
     // --- Block Place ---
-    bus.emplaceListener<PlayerPlacingBlockEvent>([](PlayerPlacingBlockEvent& ev) {
-        auto& pos         = ev.pos();
+    bus.emplaceListener<PlayerPlaceBlockEvent>([](PlayerPlaceBlockEvent& ev) {
+        auto&       pos   = ev.pos();
         std::string uuid  = ev.self().getUuid().asString();
         std::string block = ev.block().getTypeName();
         forwardBlockPlaceEvent(pos.x, pos.y, pos.z, block, uuid);
@@ -829,8 +794,8 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
         });
     });
 
-    // --- Entity Hurt ---
-    bus.emplaceListener<EntityHurtEvent>([](EntityHurtEvent& ev) {
+    // --- Actor Hurt ---
+    bus.emplaceListener<ActorHurtEvent>([](ActorHurtEvent& ev) {
         std::string type  = ev.self().getTypeName();
         float       dmg   = ev.damage();
         std::string cause = std::to_string((int)ev.source().getCause());
@@ -845,8 +810,8 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
         });
     });
 
-    // --- Entity Die ---
-    bus.emplaceListener<EntityDieEvent>([](EntityDieEvent& ev) {
+    // --- Mob Die ---
+    bus.emplaceListener<MobDieEvent>([](MobDieEvent& ev) {
         std::string type  = ev.self().getTypeName();
         std::string cause = std::to_string((int)ev.source().getCause());
         fireJavaBridge("EntityDie", [type, cause](JNIEnv* env, jclass cls) {
@@ -873,17 +838,6 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
         });
     });
 
-    // --- Chunk Loaded ---
-    bus.emplaceListener<ChunkLoadedEvent>([](ChunkLoadedEvent& ev) {
-        auto pos = ev.chunk().getPosition();
-        fireJavaBridge("ChunkLoaded", [cx=pos.x, cz=pos.z](JNIEnv* env, jclass cls) {
-            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
-                              "onChunkLoaded", "(II)V");
-            if (!m) return;
-            env->CallStaticVoidMethod(cls, m, (jint)cx, (jint)cz);
-        });
-    });
-
     // --- Server Started ---
     bus.emplaceListener<ServerStartedEvent>([](ServerStartedEvent&) {
         fireJavaBridge("ServerStarted", [](JNIEnv* env, jclass cls) {
@@ -893,8 +847,8 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
         });
     });
 
-    // --- Server Stopped ---
-    bus.emplaceListener<ServerStoppedEvent>([](ServerStoppedEvent&) {
+    // --- Server Stopping ---
+    bus.emplaceListener<ServerStoppingEvent>([](ServerStoppingEvent&) {
         fireJavaBridge("ServerStopped", [](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
                               "onServerStopped", "()V");
@@ -907,7 +861,6 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
     );
 }
 
-// C++ handler registration
 void ForgeEventForwarder::onPlayerJoin(PlayerEventHandler h)  { playerJoinHandlers.push_back(h); }
 void ForgeEventForwarder::onPlayerLeave(PlayerEventHandler h) { playerLeaveHandlers.push_back(h); }
 void ForgeEventForwarder::onBlockBreak(BlockEventHandler h)   { blockBreakHandlers.push_back(h); }
@@ -915,17 +868,16 @@ void ForgeEventForwarder::onBlockPlace(BlockEventHandler h)   { blockPlaceHandle
 
 void ForgeEventForwarder::forwardPlayerJoinEvent(const std::string& id)  { for (auto& h : playerJoinHandlers)  h(id); }
 void ForgeEventForwarder::forwardPlayerLeaveEvent(const std::string& id) { for (auto& h : playerLeaveHandlers) h(id); }
-void ForgeEventForwarder::forwardBlockBreakEvent(int x,int y,int z,const std::string& id) { for(auto&h:blockBreakHandlers) h(x,y,z,id); }
-void ForgeEventForwarder::forwardBlockPlaceEvent(int x,int y,int z,const std::string& b,const std::string& id) { for(auto&h:blockPlaceHandlers) h(x,y,z,id); }
+void ForgeEventForwarder::forwardBlockBreakEvent(int x,int y,int z,const std::string& id) { for(auto& h:blockBreakHandlers) h(x,y,z,id); }
+void ForgeEventForwarder::forwardBlockPlaceEvent(int x,int y,int z,const std::string& b,const std::string& id) { for(auto& h:blockPlaceHandlers) h(x,y,z,id); }
 void ForgeEventForwarder::registerForgeEventListener(JNIEnv* env,const std::string&,jobject l) {
     registeredForgeListeners.push_back(env->NewGlobalRef(l));
 }
 
 // ============================================================================
-// LEVILAMINA HOOKS — low level Bedrock function intercepts
+// LEVILAMINA HOOKS
 // ============================================================================
 
-// Hook: intercept chat to let Java mods cancel or modify messages
 LL_AUTO_TYPE_INSTANCE_HOOK(
     ChatHook,
     ll::memory::HookPriority::Normal,
@@ -934,7 +886,6 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     void,
     std::string const& message
 ) {
-    // Let Java decide if chat is allowed
     bool cancelled = false;
     JNIThreadManager::ThreadGuard guard;
     JNIEnv* env = guard.getEnv();
@@ -957,7 +908,6 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 
 // ============================================================================
 // FORGE COMMAND BRIDGE
-// /forge <subcommand> — lets admins control the translation layer in-game
 // ============================================================================
 
 static void registerForgeCommands() {
@@ -994,7 +944,7 @@ static void registerForgeCommands() {
         .text("gc")
         .execute([](CommandOrigin const&, CommandOutput& out, ForgeCmd const&) {
             enqueueJNICall("ManualGC", [](JNIEnv* env) {
-                jclass rt = env->FindClass("java/lang/Runtime");
+                jclass rt       = env->FindClass("java/lang/Runtime");
                 jmethodID getRt = env->GetStaticMethodID(rt, "getRuntime", "()Ljava/lang/Runtime;");
                 jobject rtInst  = env->CallStaticObjectMethod(rt, getRt);
                 jmethodID gc    = env->GetMethodID(rt, "gc", "()V");
@@ -1038,7 +988,6 @@ bool ModMorpher::initialize(JavaVM* jvm, JNIEnv* env) {
     ForgeEventForwarder::registerLeviLaminaHooks();
     registerForgeCommands();
 
-    // Start async JNI worker thread
     gJNIWorkerRunning = true;
     gJNIWorkerThread  = std::thread(jniWorkerLoop);
 
@@ -1051,11 +1000,9 @@ void ModMorpher::shutdown() {
     if (!initialized) return;
     auto& logger = my_mod::MyMod::getInstance().getSelf().getLogger();
 
-    // Stop worker thread
     gJNIWorkerRunning = false;
     if (gJNIWorkerThread.joinable()) gJNIWorkerThread.join();
 
-    // Clean up Java class cache and global refs
     if (cachedEnv) {
         JavaClassCache::clear(cachedEnv);
         for (auto ref : ForgeEventForwarder::registeredForgeListeners)
@@ -1077,7 +1024,6 @@ bool ModMorpher::loadForgeMod(const std::string& jarPath) {
     auto& logger = my_mod::MyMod::getInstance().getSelf().getLogger();
 
     enqueueJNICall("LoadForgeMod:" + jarPath, [jarPath, &logger](JNIEnv* env) {
-        // Build URLClassLoader for the JAR
         jclass urlClass    = env->FindClass("java/net/URL");
         jclass loaderClass = env->FindClass("java/net/URLClassLoader");
         if (!urlClass || !loaderClass) {
@@ -1086,20 +1032,16 @@ bool ModMorpher::loadForgeMod(const std::string& jarPath) {
         }
         jmethodID urlCtor    = env->GetMethodID(urlClass, "<init>", "(Ljava/lang/String;)V");
         jmethodID loaderCtor = env->GetMethodID(loaderClass, "<init>", "([Ljava/net/URL;)V");
-        jstring jpath = env->NewStringUTF(("file:" + jarPath).c_str());
-        jobject url   = env->NewObject(urlClass, urlCtor, jpath);
+        jstring jpath        = env->NewStringUTF(("file:" + jarPath).c_str());
+        jobject url          = env->NewObject(urlClass, urlCtor, jpath);
         env->DeleteLocalRef(jpath);
         jobjectArray urls = env->NewObjectArray(1, urlClass, url);
         jobject loader    = env->NewObject(loaderClass, loaderCtor, urls);
         env->DeleteLocalRef(urls); env->DeleteLocalRef(url);
-
         if (!loader) { logger.error("loadForgeMod: failed to create URLClassLoader"); return; }
 
-        // Try to find and invoke the mod's main initializer
-        // Convention: mods expose a class with a static void init() method
         jmethodID findClass = env->GetMethodID(loaderClass, "loadClass",
                                                "(Ljava/lang/String;)Ljava/lang/Class;");
-        // Try common Forge mod entry point patterns
         const char* entryPoints[] = {
             "net.minecraftforge.fml.common.Mod",
             "com.example.mod.ModMain",
@@ -1131,7 +1073,7 @@ bool ModMorpher::unloadForgeMod(const std::string& modId) {
     return true;
 }
 
-std::vector<std::string> ModMorpher::getLoadedMods()  { return loadedMods; }
-bool                     ModMorpher::isInitialized()   { return initialized; }
+std::vector<std::string> ModMorpher::getLoadedMods() { return loadedMods; }
+bool                     ModMorpher::isInitialized()  { return initialized; }
 
 } // namespace modmorpher
