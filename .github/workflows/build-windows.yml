@@ -19,23 +19,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Install xmake
-        run: |
-          choco install xmake -y
-      
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
       
+      - name: Install xmake
+        shell: powershell
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri "https://github.com/xmake-io/xmake/releases/download/v2.8.9/xmake-v2.8.9.win64.exe" -OutFile "$env:TEMP\xmake-installer.exe"
+          & "$env:TEMP\xmake-installer.exe" /S /D="$env:ProgramFiles\xmake"
+      
       - name: Configure xmake
         shell: cmd
         run: |
-          C:\ProgramData\chocolatey\bin\xmake.exe f -p windows -a x86_64 --target_type=${{ matrix.target_type }} -m ${{ matrix.build_mode }} -y
+          set PATH=%ProgramFiles%\xmake;%PATH%
+          xmake f -p windows -a x86_64 --target_type=${{ matrix.target_type }} -m ${{ matrix.build_mode }} -y
       
       - name: Build mod
         shell: cmd
-        run: C:\ProgramData\chocolatey\bin\xmake.exe
+        run: |
+          set PATH=%ProgramFiles%\xmake;%PATH%
+          xmake
       
       - name: List build output
         run: |
