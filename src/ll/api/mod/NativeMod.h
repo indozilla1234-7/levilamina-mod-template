@@ -1,39 +1,35 @@
 #pragma once
 
-#include <string>
 #include <memory>
+#include <string_view>
 
-namespace ll {
-namespace mod {
+#include "ll/api/base/Macro.h"
+#include "ll/api/mod/Manifest.h"
+#include "ll/api/mod/Mod.h"
+#include "ll/api/utils/SystemUtils.h"
 
-class Logger {
+namespace ll::mod {
+
+class NativeModManager;
+[[maybe_unused]] constexpr std::string_view NativeModManagerName = "native";
+
+class NativeMod : public Mod {
+    friend NativeModManager;
+    struct Impl;
+    std::unique_ptr<Impl> mImpl;
+
+protected:
+    sys_utils::DynamicLibrary& getDynamicLibrary();
+
 public:
-    void info(const std::string& msg) {}
-    void warn(const std::string& msg) {}
-    void error(const std::string& msg) {}
-    void debug(const std::string& msg) {}
+    NativeMod(Manifest manifest, sys_utils::HandleT handle = nullptr);
+    ~NativeMod();
+
+    LLNDAPI sys_utils::HandleT getHandle() const;
+
+    LLNDAPI static std::shared_ptr<NativeMod> getByHandle(sys_utils::HandleT handle);
+
+    LLNDAPI static std::shared_ptr<NativeMod> current(sys_utils::HandleT handle = sys_utils::getCurrentModuleHandle());
 };
 
-class NativeMod {
-    Logger mLogger;
-    
-public:
-    static NativeMod* current() {
-        static NativeMod instance;
-        return &instance;
-    }
-    
-    NativeMod() = default;
-    
-    Logger& getLogger() {
-        return mLogger;
-    }
-};
-
-} // namespace mod
-} // namespace ll
-
-// Forward declare MyMod for convenience
-namespace my_mod {
-class MyMod;
-}
+} // namespace ll::mod

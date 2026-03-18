@@ -1,0 +1,42 @@
+#include "ll/api/event/player/PlayerUseItemEvent.h"
+#include "ll/api/event/Emitter.h"
+#include "ll/api/event/EventRefObjSerializer.h"
+#include "ll/api/memory/Hook.h"
+
+#include "mc/world/inventory/transaction/PlayerTransactionSubject.h"
+
+#include "mc/nbt/CompoundTag.h"
+
+namespace ll::event::inline player {
+
+void PlayerUseItemEvent::serialize(CompoundTag& nbt) const {
+    Cancellable::serialize(nbt);
+    nbt["item"] = serializeRefObj(item());
+}
+
+ItemStack& PlayerUseItemEvent::item() const { return mItem; }
+
+LL_TYPE_INSTANCE_HOOK(
+    PlayerUseItemEventHook,
+    HookPriority::Normal,
+    PlayerTransactionSubject,
+    &PlayerTransactionSubject::$baseUseItem,
+    bool,
+    ItemStack& item
+) {
+    auto ev = PlayerUseItemEvent(mUnk18866d.as<Player&>(), item);
+    EventBus::getInstance().publish(ev);
+    if (ev.isCancelled()) {
+        return false;
+    }
+    return origin(item);
+}
+
+static std::unique_ptr<EmitterBase> emitterFactory();
+class PlayerUseItemEventEmitter : public Emitter<emitterFactory, PlayerUseItemEvent> {
+    memory::HookRegistrar<PlayerUseItemEventHook> hook;
+};
+
+static std::unique_ptr<EmitterBase> emitterFactory() { return std::make_unique<PlayerUseItemEventEmitter>(); }
+
+} // namespace ll::event::inline player
