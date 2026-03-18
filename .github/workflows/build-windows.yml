@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Setup MSVC
+      - name: Setup MSVC and Build
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -30,11 +30,11 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
           Invoke-WebRequest -Uri "https://github.com/xmake-io/xmake/releases/download/v3.0.7/xmake-v3.0.7.win64.exe" -OutFile "$env:TEMP\xmake-installer.exe"
           & "$env:TEMP\xmake-installer.exe" /S /D="$env:ProgramFiles\xmake"
+          Add-Content $env:GITHUB_PATH "$env:ProgramFiles\xmake"
       
       - name: Configure and Build
         shell: cmd
         run: |
-          set PATH=%ProgramFiles%\xmake;%PATH%
           xmake global --clean
           xmake f -p windows -a x86_64 --target_type=${{ matrix.target_type }} -m ${{ matrix.build_mode }} -y
           xmake -y
