@@ -28,7 +28,7 @@ jobs:
         shell: powershell
         run: |
           $ProgressPreference = 'SilentlyContinue'
-          Invoke-WebRequest -Uri "https://github.com/xmake-io/xmake/releases/download/v2.8.9/xmake-v2.8.9.win64.exe" -OutFile "$env:TEMP\xmake-installer.exe"
+          Invoke-WebRequest -Uri "https://github.com/xmake-io/xmake/releases/download/v3.0.7/xmake-v3.0.7.win64.exe" -OutFile "$env:TEMP\xmake-installer.exe"
           & "$env:TEMP\xmake-installer.exe" /S /D="$env:ProgramFiles\xmake"
       
       - name: Configure xmake
