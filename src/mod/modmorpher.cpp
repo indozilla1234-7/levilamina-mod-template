@@ -117,7 +117,7 @@ bool BedrockSymbolResolver::initialize() {
 
     int ok = 0;
     for (auto& s : symbols) {
-        *s.target = ll::memory::getSymbol<void*>(s.name);
+        *s.target = ll::memory::resolveSymbol<void*>(s.name);
         if (*s.target) { ok++; logger.info("  [OK] " + std::string(s.name)); }
         else             logger.warn("  [!!] " + std::string(s.name));
     }
@@ -128,7 +128,7 @@ bool BedrockSymbolResolver::initialize() {
 }
 
 void* BedrockSymbolResolver::resolveSymbol(const char* n) {
-    return ll::memory::getSymbol<void*>(n);
+    return ll::memory::resolveSymbol<void*>(n);
 }
 
 BedrockSymbolResolver::ActorSetPos       BedrockSymbolResolver::getActorSetPos()       { return actorSetPos; }
@@ -636,8 +636,8 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
 
     // --- Player Join ---
     bus.emplaceListener<PlayerJoinEvent>([](PlayerJoinEvent& ev) {
-        std::string uuid = ev.mEntity.getUuid().asString();
-        std::string name = ev.mEntity.getRealName();
+        std::string uuid = ev.self().getUuid().asString();
+        std::string name = ev.self().getRealName();
         forwardPlayerJoinEvent(uuid);
         fireJavaBridge("PlayerJoin", [uuid, name](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
@@ -652,11 +652,11 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
 
     // --- Player Disconnect ---
     bus.emplaceListener<PlayerDisconnectEvent>([](PlayerDisconnectEvent& ev) {
-        std::string uuid = ev.mEntity.getUuid().asString();
+        std::string uuid = ev.self().getUuid().asString();
         forwardPlayerLeaveEvent(uuid);
         JNIThreadManager::ThreadGuard guard;
         if (JNIEnv* env = guard.getEnv()) {
-            jobject ref = EntityTracker::getJavaEntity(&ev.mEntity);
+            jobject ref = EntityTracker::getJavaEntity(&ev.self());
             if (ref) EntityTracker::unregisterEntity(env, ref);
         }
         fireJavaBridge("PlayerLeave", [uuid](JNIEnv* env, jclass cls) {
@@ -671,7 +671,7 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
 
     // --- Player Chat ---
     bus.emplaceListener<PlayerChatEvent>([](PlayerChatEvent& ev) {
-        std::string uuid    = ev.mEntity.getUuid().asString();
+        std::string uuid    = ev.self().getUuid().asString();
         std::string message = ev.message();
         fireJavaBridge("PlayerChat", [uuid, message](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
@@ -686,8 +686,8 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
 
     // --- Player Die ---
     bus.emplaceListener<PlayerDieEvent>([](PlayerDieEvent& ev) {
-        std::string uuid  = ev.mEntity.getUuid().asString();
-        std::string cause = std::to_string((int)ev.source().getCause());
+        std::string uuid  = ev.self().getUuid().asString();
+        std::string cause = std::to_string((int)static_cast<int>(ev.source().getEntityDamageCause()));
         fireJavaBridge("PlayerDie", [uuid, cause](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
                               "onPlayerDeath", "(Ljava/lang/String;Ljava/lang/String;)V");
@@ -701,7 +701,7 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
 
     // --- Player Respawn ---
     bus.emplaceListener<PlayerRespawnEvent>([](PlayerRespawnEvent& ev) {
-        std::string uuid = ev.mEntity.getUuid().asString();
+        std::string uuid = ev.self().getUuid().asString();
         fireJavaBridge("PlayerRespawn", [uuid](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
                               "onPlayerRespawn", "(Ljava/lang/String;)V");
@@ -714,7 +714,7 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
 
     // --- Player Attack ---
     bus.emplaceListener<PlayerAttackEvent>([](PlayerAttackEvent& ev) {
-        std::string uuid   = ev.mEntity.getUuid().asString();
+        std::string uuid   = ev.self().getUuid().asString();
         std::string target = ev.target().getTypeName();
         fireJavaBridge("PlayerAttack", [uuid, target](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
@@ -729,9 +729,9 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
 
     // --- Player Interact Block ---
     bus.emplaceListener<PlayerInteractBlockEvent>([&](PlayerInteractBlockEvent& ev) {
-        std::string uuid  = ev.mEntity.getUuid().asString();
-        auto&       pos   = ev.mBlockPos;
-        std::string block = ev.block().getTypeName();
+        std::string uuid  = ev.self().getUuid().asString();
+        auto&       pos   = ev.pos();
+        std::string block = ev.block() ? ev.block()->getTypeName() : "air";
         fireJavaBridge("PlayerInteractBlock", [uuid, x=pos.x, y=pos.y, z=pos.z, block](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
                               "onPlayerInteractBlock", "(Ljava/lang/String;IIILjava/lang/String;)V");
@@ -745,7 +745,7 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
 
     // --- Player Pick Up Item ---
     bus.emplaceListener<PlayerPickUpItemEvent>([](PlayerPickUpItemEvent& ev) {
-        std::string uuid = ev.mEntity.getUuid().asString();
+        std::string uuid = ev.self().getUuid().asString();
         std::string item = ev.itemActor().getTypeName();
         fireJavaBridge("PlayerPickUpItem", [uuid, item](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
@@ -760,12 +760,12 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
 
     // --- Block Break ---
     bus.emplaceListener<PlayerDestroyBlockEvent>([&](PlayerDestroyBlockEvent& ev) {
-        auto&       pos   = ev.mBlockPos;
-        std::string uuid  = ev.mEntity.getUuid().asString();
-        std::string block = ev.mEntity.getDimension()
+        auto&       pos   = ev.pos();
+        std::string uuid  = ev.self().getUuid().asString();
+        std::string block = ev.self().getDimension()
                               .getBlockSourceFromMainChunkLoadState()
                               .getBlock(pos).getTypeName();
-        forwardBlockBreakEvent(pos.x, pos.y, pos.z, uuid);
+        forwardBlockBreakEvent((int)pos.x, (int)pos.y, (int)pos.z, uuid);
         fireJavaBridge("BlockBreak", [uuid, x=pos.x, y=pos.y, z=pos.z, block](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
                               "onBlockBreak", "(IIILjava/lang/String;Ljava/lang/String;)V");
@@ -779,10 +779,10 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
 
     // --- Block Place ---
     bus.emplaceListener<PlayerPlaceBlockEvent>([&](PlayerPlaceBlockEvent& ev) {
-        auto&       pos   = ev.mBlockPos;
-        std::string uuid  = ev.mEntity.getUuid().asString();
-        std::string block = ev.block().getTypeName();
-        forwardBlockPlaceEvent(pos.x, pos.y, pos.z, block, uuid);
+        auto&       pos   = ev.pos();
+        std::string uuid  = ev.self().getUuid().asString();
+        std::string block = ev.block() ? ev.block()->getTypeName() : "air";
+        forwardBlockPlaceEvent((int)pos.x, (int)pos.y, (int)pos.z, block, uuid);
         fireJavaBridge("BlockPlace", [uuid, x=pos.x, y=pos.y, z=pos.z, block](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
                               "onBlockPlace", "(IIILjava/lang/String;Ljava/lang/String;)V");
@@ -796,9 +796,9 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
 
     // --- Actor Hurt ---
     bus.emplaceListener<ActorHurtEvent>([](ActorHurtEvent& ev) {
-        std::string type  = ev.mEntity.getTypeName();
+        std::string type  = ev.self().getTypeName();
         float       dmg   = ev.damage();
-        std::string cause = std::to_string((int)ev.source().getCause());
+        std::string cause = std::to_string((int)static_cast<int>(ev.source().getEntityDamageCause()));
         fireJavaBridge("EntityHurt", [type, dmg, cause](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
                               "onEntityHurt", "(Ljava/lang/String;FLjava/lang/String;)V");
@@ -812,8 +812,8 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
 
     // --- Mob Die ---
     bus.emplaceListener<MobDieEvent>([](MobDieEvent& ev) {
-        std::string type  = ev.mEntity.getTypeName();
-        std::string cause = std::to_string((int)ev.source().getCause());
+        std::string type  = ev.self().getTypeName();
+        std::string cause = std::to_string((int)static_cast<int>(ev.source().getEntityDamageCause()));
         fireJavaBridge("EntityDie", [type, cause](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
                               "onEntityDeath", "(Ljava/lang/String;Ljava/lang/String;)V");
@@ -827,8 +827,8 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
 
     // --- Mob Spawn ---
     bus.emplaceListener<SpawnMobEvent>([](SpawnMobEvent& ev) {
-        auto& self = ev.mEntity;
-        std::string type = ev.mEntity.getTypeName();
+        auto& self = ev.self();
+        std::string type = ev.self().getTypeName();
         fireJavaBridge("MobSpawn", [type](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
                               "onMobSpawn", "(Ljava/lang/String;)V");
@@ -919,7 +919,7 @@ static void registerForgeCommands() {
         std::string modId;
     };
 
-    auto& cmd = CommandRegistrar::getInstance(my_mod::MyMod::getInstance().getSelf().getModContext()).getOrCreateCommand(
+    auto& cmd = CommandRegistrar::getInstance(my_mod::MyMod::getInstance().getSelf()).getOrCreateCommand(
         "forge", "Forge-Bedrock translator control"
     );
 
