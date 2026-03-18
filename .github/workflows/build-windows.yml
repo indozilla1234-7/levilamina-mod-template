@@ -31,16 +31,10 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/xmake-io/xmake/releases/download/v3.0.7/xmake-v3.0.7.win64.exe" -OutFile "$env:TEMP\xmake-installer.exe"
           & "$env:TEMP\xmake-installer.exe" /S /D="$env:ProgramFiles\xmake"
       
-      - name: Configure xmake
-        shell: cmd
+      - name: Configure and Build
         run: |
           set PATH=%ProgramFiles%\xmake;%PATH%
           xmake f -p windows -a x86_64 --target_type=${{ matrix.target_type }} -m ${{ matrix.build_mode }} -y
-      
-      - name: Build mod
-        shell: cmd
-        run: |
-          set PATH=%ProgramFiles%\xmake;%PATH%
           xmake
       
       - name: List build output
