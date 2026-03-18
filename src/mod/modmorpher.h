@@ -315,6 +315,7 @@ public:
  * Forwards Bedrock events to Forge mods
  */
 class ForgeEventForwarder {
+public: static void registerLeviLaminaHooks();
 public:
     static std::vector<jobject> registeredForgeListeners;
     using PlayerEventHandler = std::function<void(const std::string&)>;

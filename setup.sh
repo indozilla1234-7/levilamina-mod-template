@@ -56,4 +56,4 @@ sed -i 's/bus.emplaceListener<SpawnMobEvent>(\[](SpawnMobEvent\& ev) {/bus.empla
 sed -i 's/\&Player::chat/nullptr/g' "$CPP_FILE" # Disables the broken hook reference
 
 echo "Fixes applied. Please check for any remaining 'optional_ref' or 'Dimension' undefined errors."
-echo "Note: You may need to add #include <mc/world/level/Dimension.h> if it's still missing."
+echo "Note: You may need to add #include <mc/world/level/Dimension.h> if it's still missing." 
