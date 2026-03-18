@@ -13,4 +13,4 @@ else
     echo "ERROR: xmake not found"
     echo "Please install xmake first: bash setup.sh"
     exit 1
-fi
+fi 
