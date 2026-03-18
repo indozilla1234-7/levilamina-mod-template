@@ -35,8 +35,9 @@ jobs:
         shell: cmd
         run: |
           set PATH=%ProgramFiles%\xmake;%PATH%
+          xmake global --clean
           xmake f -p windows -a x86_64 --target_type=${{ matrix.target_type }} -m ${{ matrix.build_mode }} -y
-          xmake
+          xmake -y
       
       - name: List build output
         shell: cmd
