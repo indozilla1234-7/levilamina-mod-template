@@ -8,27 +8,21 @@ option("target_type")
     set_values("server", "client")
 option_end()
 
--- add_requires("levilamina x.x.x") for a specific version
--- add_requires("levilamina develop") to use develop version
--- please note that you should add bdslibrary yourself if using dev version
 add_requires("levilamina", {configs = {target_type = get_config("target_type")}})
-
 add_requires("levibuildscript")
 
--- Support cross-compilation: build Windows DLL from Linux
--- Usage: xmake f -p windows -a x86_64 && xmake
 if is_os("windows") or is_plat("windows") then
     if not has_config("vs_runtime") then
         set_runtimes("MD")
     end
 end
 
-target("my-mod") -- Change this to your mod name.
+target("my-mod")
     add_rules("@levibuildscript/linkrule")
     add_rules("@levibuildscript/modpacker")
     
     if is_os("windows") or is_plat("windows") then
-        add_cxflags( "/EHa", "/utf-8", "/W4", "/w44265", "/w44289", "/w44296", "/w45263", "/w44738", "/w45204")
+        add_cxflags("/EHa", "/utf-8", "/W4", "/w44265", "/w44289", "/w44296", "/w45263", "/w44738", "/w45204")
         add_defines("NOMINMAX", "UNICODE")
         set_exceptions("none")
     else
@@ -40,7 +34,7 @@ target("my-mod") -- Change this to your mod name.
     set_languages("c++20")
     set_symbols("debug")
     add_headerfiles("src/**.h")
-    add_files("src/**.cpp")
+    add_files("src/**.cpp|ll/**")
     add_includedirs("src")
     if is_config("target_type", "server") then
     --  add_includedirs("src-server")
