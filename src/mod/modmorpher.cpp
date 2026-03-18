@@ -1,550 +1,1124 @@
 #include "modmorpher.h"
 #include "mod/MyMod.h"
 #include <algorithm>
+#include <chrono>
+#include <sstream>
+#include <fstream>
+#include <thread>
+#include <mutex>
+#include <queue>
+#include <atomic>
+
+// ============================================================================
+// LEVILAMINA INCLUDES
+// ============================================================================
+#include "ll/api/event/EventBus.h"
+#include "ll/api/event/player/PlayerJoinEvent.h"
+#include "ll/api/event/player/PlayerLeaveEvent.h"
+#include "ll/api/event/player/PlayerDestroyBlockEvent.h"
+#include "ll/api/event/player/PlayerPlacingBlockEvent.h"
+#include "ll/api/event/player/PlayerAttackEvent.h"
+#include "ll/api/event/player/PlayerChatEvent.h"
+#include "ll/api/event/player/PlayerDieEvent.h"
+#include "ll/api/event/player/PlayerRespawnEvent.h"
+#include "ll/api/event/player/PlayerInteractBlockEvent.h"
+#include "ll/api/event/player/PlayerPickUpItemEvent.h"
+#include "ll/api/event/entity/EntityDieEvent.h"
+#include "ll/api/event/entity/EntityHurtEvent.h"
+#include "ll/api/event/world/ChunkLoadedEvent.h"
+#include "ll/api/event/world/SpawnMobEvent.h"
+#include "ll/api/event/server/ServerStartedEvent.h"
+#include "ll/api/event/server/ServerStoppedEvent.h"
+#include "ll/api/memory/Hook.h"
+#include "ll/api/memory/Memory.h"
+#include "ll/api/command/CommandHandle.h"
+#include "ll/api/command/CommandRegistrar.h"
+#include "mc/world/actor/player/Player.h"
+#include "mc/world/level/block/Block.h"
+#include "mc/world/level/BlockSource.h"
+#include "mc/world/level/Level.h"
+#include "mc/math/Vec3.h"
+#include "mc/nbt/CompoundTag.h"
 
 namespace modmorpher {
 
 // ============================================================================
-// BEDROCK SYMBOL RESOLVER - STATIC INITIALIZATION
+// ASYNC JNI CALL QUEUE
+// Bedrock ticks on a tight loop — we never want JNI calls stalling it.
+// Heavy Java work is pushed here and drained on a dedicated thread.
 // ============================================================================
 
-BedrockSymbolResolver::ActorSetPos BedrockSymbolResolver::actorSetPos = nullptr;
-BedrockSymbolResolver::ActorGetPos BedrockSymbolResolver::actorGetPos = nullptr;
-BedrockSymbolResolver::BlockSetType BedrockSymbolResolver::blockSetType = nullptr;
+struct JNICall {
+    std::function<void(JNIEnv*)> fn;
+    std::string description;
+};
+
+static std::queue<JNICall>  gJNIQueue;
+static std::mutex           gJNIQueueMutex;
+static std::atomic<bool>    gJNIWorkerRunning{false};
+static std::thread          gJNIWorkerThread;
+
+static void jniWorkerLoop() {
+    auto& logger = my_mod::MyMod::getInstance().getSelf().getLogger();
+    logger.info("JNI worker thread started");
+
+    while (gJNIWorkerRunning) {
+        std::unique_lock<std::mutex> lock(gJNIQueueMutex);
+        if (gJNIQueue.empty()) {
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+        JNICall call = std::move(gJNIQueue.front());
+        gJNIQueue.pop();
+        lock.unlock();
+
+        JNIThreadManager::ThreadGuard guard;
+        JNIEnv* env = guard.getEnv();
+        if (env) {
+            call.fn(env);
+        } else {
+            logger.error("JNI worker: no env for call: " + call.description);
+        }
+    }
+    logger.info("JNI worker thread stopped");
+}
+
+static void enqueueJNICall(std::string desc, std::function<void(JNIEnv*)> fn) {
+    std::lock_guard<std::mutex> lock(gJNIQueueMutex);
+    gJNIQueue.push({std::move(fn), std::move(desc)});
+}
+
+// ============================================================================
+// BEDROCK SYMBOL RESOLVER
+// ============================================================================
+
+BedrockSymbolResolver::ActorSetPos       BedrockSymbolResolver::actorSetPos       = nullptr;
+BedrockSymbolResolver::ActorGetPos       BedrockSymbolResolver::actorGetPos       = nullptr;
+BedrockSymbolResolver::BlockSetType      BedrockSymbolResolver::blockSetType      = nullptr;
 BedrockSymbolResolver::DimensionGetBlock BedrockSymbolResolver::dimensionGetBlock = nullptr;
-BedrockSymbolResolver::ActorAddTag BedrockSymbolResolver::actorAddTag = nullptr;
+BedrockSymbolResolver::ActorAddTag       BedrockSymbolResolver::actorAddTag       = nullptr;
 BedrockSymbolResolver::ActorSetAttribute BedrockSymbolResolver::actorSetAttribute = nullptr;
-BedrockSymbolResolver::CommandExecute BedrockSymbolResolver::commandExecute = nullptr;
-BedrockSymbolResolver::BlockCreate BedrockSymbolResolver::blockCreate = nullptr;
-bool BedrockSymbolResolver::resolved = false;
-
-// ============================================================================
-// BEDROCK SYMBOL RESOLVER - IMPLEMENTATION
-// ============================================================================
+BedrockSymbolResolver::CommandExecute    BedrockSymbolResolver::commandExecute    = nullptr;
+BedrockSymbolResolver::BlockCreate       BedrockSymbolResolver::blockCreate       = nullptr;
+bool                                     BedrockSymbolResolver::resolved          = false;
 
 bool BedrockSymbolResolver::initialize() {
     if (resolved) return true;
+    auto& logger = my_mod::MyMod::getInstance().getSelf().getLogger();
+    logger.info("ModMorpher: Resolving Bedrock symbols...");
 
-    my_mod::MyMod::getInstance().getSelf().getLogger().info("ModMorpher: Initializing symbol resolver");
+    struct SymbolDef { const char* name; void** target; };
+    SymbolDef symbols[] = {
+        {"?setPos@Actor@@UEAAXAEBVVec3@@@Z",
+            reinterpret_cast<void**>(&actorSetPos)},
+        {"?getPosition@Actor@@UEBAAEBVVec3@@@Z",
+            reinterpret_cast<void**>(&actorGetPos)},
+        {"?setBlock@BlockSource@@QEAA_NAEBVBlockPos@@AEBVBlock@@HPEAUActorBlockSyncMessage@@@Z",
+            reinterpret_cast<void**>(&blockSetType)},
+        {"?addTag@Actor@@QEAAXAEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@Z",
+            reinterpret_cast<void**>(&actorAddTag)},
+        {"?setAttribute@Actor@@QEAAXAEBVAttribute@@M@Z",
+            reinterpret_cast<void**>(&actorSetAttribute)},
+    };
+
+    int ok = 0;
+    for (auto& s : symbols) {
+        *s.target = ll::memory::resolveSymbol<void*>(s.name);
+        if (*s.target) { ok++; logger.info("  [OK] " + std::string(s.name)); }
+        else             logger.warn("  [!!] " + std::string(s.name));
+    }
+
+    logger.info("ModMorpher: " + std::to_string(ok) + "/" +
+                std::to_string(sizeof(symbols)/sizeof(symbols[0])) + " symbols resolved");
     resolved = true;
     return true;
 }
 
-BedrockSymbolResolver::ActorSetPos BedrockSymbolResolver::getActorSetPos() { return actorSetPos; }
-BedrockSymbolResolver::ActorGetPos BedrockSymbolResolver::getActorGetPos() { return actorGetPos; }
-BedrockSymbolResolver::BlockSetType BedrockSymbolResolver::getBlockSetType() { return blockSetType; }
-BedrockSymbolResolver::DimensionGetBlock BedrockSymbolResolver::getDimensionGetBlock() {
-    return dimensionGetBlock;
-}
-BedrockSymbolResolver::ActorAddTag BedrockSymbolResolver::getActorAddTag() { return actorAddTag; }
-BedrockSymbolResolver::ActorSetAttribute BedrockSymbolResolver::getActorSetAttribute() {
-    return actorSetAttribute;
-}
-BedrockSymbolResolver::CommandExecute BedrockSymbolResolver::getCommandExecute() {
-    return commandExecute;
+void* BedrockSymbolResolver::resolveSymbol(const char* n) {
+    return ll::memory::resolveSymbol<void*>(n);
 }
 
-BedrockSymbolResolver::BlockCreate BedrockSymbolResolver::getBlockCreate() {
-    return blockCreate;
-}
-
-void* BedrockSymbolResolver::resolveSymbol(const char* mangledName) {
-    (void)mangledName;
-    return nullptr;
-}
+BedrockSymbolResolver::ActorSetPos       BedrockSymbolResolver::getActorSetPos()       { return actorSetPos; }
+BedrockSymbolResolver::ActorGetPos       BedrockSymbolResolver::getActorGetPos()       { return actorGetPos; }
+BedrockSymbolResolver::BlockSetType      BedrockSymbolResolver::getBlockSetType()      { return blockSetType; }
+BedrockSymbolResolver::DimensionGetBlock BedrockSymbolResolver::getDimensionGetBlock() { return dimensionGetBlock; }
+BedrockSymbolResolver::ActorAddTag       BedrockSymbolResolver::getActorAddTag()       { return actorAddTag; }
+BedrockSymbolResolver::ActorSetAttribute BedrockSymbolResolver::getActorSetAttribute() { return actorSetAttribute; }
+BedrockSymbolResolver::CommandExecute    BedrockSymbolResolver::getCommandExecute()    { return commandExecute; }
+BedrockSymbolResolver::BlockCreate       BedrockSymbolResolver::getBlockCreate()       { return blockCreate; }
 
 // ============================================================================
-// JNI THREAD MANAGER - STATIC INITIALIZATION
+// JNI THREAD MANAGER
 // ============================================================================
 
-JavaVM* JNIThreadManager::jvm = nullptr;
+JavaVM*              JNIThreadManager::jvm       = nullptr;
 thread_local JNIEnv* JNIThreadManager::threadEnv = nullptr;
 
-// ============================================================================
-// JNI THREAD MANAGER - IMPLEMENTATION
-// ============================================================================
-
-void JNIThreadManager::setJVM(JavaVM* vm) {
-    jvm = vm;
-    my_mod::MyMod::getInstance().getSelf().getLogger().info("JVM set for thread manager");
-}
+void JNIThreadManager::setJVM(JavaVM* vm) { jvm = vm; }
 
 bool JNIThreadManager::ensureAttached() {
-    if (threadEnv != nullptr) {
-        return true;
-    }
-
-    if (!jvm) {
-        my_mod::MyMod::getInstance().getSelf().getLogger().error("JVM not set");
+    if (threadEnv) return true;
+    if (!jvm) return false;
+    jint r = jvm->AttachCurrentThread((void**)&threadEnv, nullptr);
+    if (r != JNI_OK) {
+        threadEnv = nullptr;
         return false;
     }
-
-    jint result = jvm->AttachCurrentThread((void**)&threadEnv, nullptr);
-    if (result != JNI_OK) {
-        my_mod::MyMod::getInstance().getSelf().getLogger().error("Failed to attach thread");
-        return false;
-    }
-
-    my_mod::MyMod::getInstance().getSelf().getLogger().debug("Thread attached to JVM");
     return true;
 }
 
 void JNIThreadManager::detachCurrentThread() {
-    if (jvm && threadEnv) {
-        jvm->DetachCurrentThread();
-        threadEnv = nullptr;
-        my_mod::MyMod::getInstance().getSelf().getLogger().debug("Thread detached from JVM");
-    }
+    if (jvm && threadEnv) { jvm->DetachCurrentThread(); threadEnv = nullptr; }
 }
 
-JNIEnv* JNIThreadManager::getEnv() {
-    if (!ensureAttached()) {
-        return nullptr;
-    }
-    return threadEnv;
-}
+JNIEnv* JNIThreadManager::getEnv() { return ensureAttached() ? threadEnv : nullptr; }
 
 JNIThreadManager::ThreadGuard::ThreadGuard() {
-    wasAttached = JNIThreadManager::threadEnv != nullptr;
-    if (!wasAttached) {
-        JNIThreadManager::ensureAttached();
-    }
+    wasAttached = (threadEnv != nullptr);
+    if (!wasAttached) ensureAttached();
 }
-
 JNIThreadManager::ThreadGuard::~ThreadGuard() {
-    if (!wasAttached) {
-        JNIThreadManager::detachCurrentThread();
+    if (!wasAttached) detachCurrentThread();
+}
+JNIEnv* JNIThreadManager::ThreadGuard::getEnv() { return threadEnv; }
+
+// ============================================================================
+// JAVA CLASS CACHE
+// Avoids FindClass overhead on every event by caching jclass + method IDs
+// ============================================================================
+
+namespace JavaClassCache {
+    struct CachedClass {
+        jclass      ref       = nullptr;
+        bool        attempted = false;
+    };
+
+    static std::map<std::string, CachedClass>              classes;
+    static std::map<std::string, jmethodID>                methods;
+    static std::mutex                                       cacheMutex;
+
+    jclass getClass(JNIEnv* env, const std::string& name) {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        auto& cached = classes[name];
+        if (cached.attempted) return cached.ref;
+        cached.attempted = true;
+        jclass local = env->FindClass(name.c_str());
+        if (!local) { env->ExceptionClear(); return nullptr; }
+        cached.ref = (jclass)env->NewGlobalRef(local);
+        env->DeleteLocalRef(local);
+        return cached.ref;
+    }
+
+    jmethodID getStaticMethod(JNIEnv* env, const std::string& cls,
+                              const std::string& method, const std::string& sig) {
+        std::string key = cls + "::" + method + sig;
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        auto it = methods.find(key);
+        if (it != methods.end()) return it->second;
+        jclass c = env->FindClass(cls.c_str());
+        if (!c) { env->ExceptionClear(); return nullptr; }
+        jmethodID m = env->GetStaticMethodID(c, method.c_str(), sig.c_str());
+        if (!m) { env->ExceptionClear(); env->DeleteLocalRef(c); return nullptr; }
+        methods[key] = m;
+        env->DeleteLocalRef(c);
+        return m;
+    }
+
+    void clear(JNIEnv* env) {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        for (auto& [k, v] : classes)
+            if (v.ref) { env->DeleteGlobalRef(v.ref); v.ref = nullptr; }
+        classes.clear();
+        methods.clear();
     }
 }
 
-JNIEnv* JNIThreadManager::ThreadGuard::getEnv() {
-    return JNIThreadManager::threadEnv;
+// Helper: fire a static void Java method on the bridge class asynchronously
+static void fireJavaBridge(std::string eventName, std::function<void(JNIEnv*, jclass)> call) {
+    enqueueJNICall(eventName, [call = std::move(call)](JNIEnv* env) {
+        jclass cls = JavaClassCache::getClass(env, "com/example/mod/ForgeEventBridge");
+        if (!cls) return;
+        call(env, cls);
+    });
 }
 
 // ============================================================================
-// BLOCK STATE MAPPER - STATIC INITIALIZATION
+// BLOCK STATE MAPPER
 // ============================================================================
 
-std::map<std::string, std::string> BlockStateMapper::blockNameMappings;
-std::map<std::string, std::map<std::string, std::string>> BlockStateMapper::propertyMappings;
+std::map<std::string, std::string>                        BlockStateMapper::blockNameMappings;
+std::map<std::string, std::map<std::string,std::string>>  BlockStateMapper::propertyMappings;
 
-// ============================================================================
-// BLOCK STATE MAPPER - IMPLEMENTATION
-// ============================================================================
+bool BlockStateMapper::loadMappings(const std::string&) {
+    blockNameMappings = {
+        // Stone
+        {"minecraft:stone","minecraft:stone"},{"minecraft:granite","minecraft:stone"},
+        {"minecraft:diorite","minecraft:stone"},{"minecraft:andesite","minecraft:stone"},
+        {"minecraft:cobblestone","minecraft:cobblestone"},
+        {"minecraft:mossy_cobblestone","minecraft:mossy_cobblestone"},
+        {"minecraft:stone_bricks","minecraft:stonebrick"},
+        {"minecraft:mossy_stone_bricks","minecraft:stonebrick"},
+        {"minecraft:cracked_stone_bricks","minecraft:stonebrick"},
+        {"minecraft:chiseled_stone_bricks","minecraft:stonebrick"},
+        // Dirt / Grass
+        {"minecraft:dirt","minecraft:dirt"},{"minecraft:coarse_dirt","minecraft:dirt"},
+        {"minecraft:grass_block","minecraft:grass"},{"minecraft:podzol","minecraft:podzol"},
+        {"minecraft:mycelium","minecraft:mycelium"},{"minecraft:farmland","minecraft:farmland"},
+        {"minecraft:dirt_path","minecraft:grass_path"},
+        // Wood logs
+        {"minecraft:oak_log","minecraft:log"},{"minecraft:spruce_log","minecraft:log"},
+        {"minecraft:birch_log","minecraft:log"},{"minecraft:jungle_log","minecraft:log"},
+        {"minecraft:acacia_log","minecraft:log2"},{"minecraft:dark_oak_log","minecraft:log2"},
+        {"minecraft:mangrove_log","minecraft:mangrove_log"},
+        {"minecraft:cherry_log","minecraft:cherry_log"},
+        {"minecraft:bamboo_block","minecraft:bamboo_block"},
+        // Planks
+        {"minecraft:oak_planks","minecraft:planks"},
+        {"minecraft:spruce_planks","minecraft:planks"},
+        {"minecraft:birch_planks","minecraft:planks"},
+        {"minecraft:jungle_planks","minecraft:planks"},
+        {"minecraft:acacia_planks","minecraft:planks"},
+        {"minecraft:dark_oak_planks","minecraft:planks"},
+        {"minecraft:mangrove_planks","minecraft:mangrove_planks"},
+        {"minecraft:cherry_planks","minecraft:cherry_planks"},
+        {"minecraft:bamboo_planks","minecraft:bamboo_planks"},
+        // Leaves
+        {"minecraft:oak_leaves","minecraft:leaves"},
+        {"minecraft:spruce_leaves","minecraft:leaves"},
+        {"minecraft:birch_leaves","minecraft:leaves"},
+        {"minecraft:jungle_leaves","minecraft:leaves"},
+        {"minecraft:acacia_leaves","minecraft:leaves2"},
+        {"minecraft:dark_oak_leaves","minecraft:leaves2"},
+        {"minecraft:mangrove_leaves","minecraft:mangrove_leaves"},
+        {"minecraft:cherry_leaves","minecraft:cherry_leaves"},
+        // Ores (overworld)
+        {"minecraft:coal_ore","minecraft:coal_ore"},
+        {"minecraft:iron_ore","minecraft:iron_ore"},
+        {"minecraft:gold_ore","minecraft:gold_ore"},
+        {"minecraft:diamond_ore","minecraft:diamond_ore"},
+        {"minecraft:emerald_ore","minecraft:emerald_ore"},
+        {"minecraft:lapis_ore","minecraft:lapis_ore"},
+        {"minecraft:redstone_ore","minecraft:redstone_ore"},
+        {"minecraft:copper_ore","minecraft:copper_ore"},
+        // Ores (deepslate)
+        {"minecraft:deepslate_coal_ore","minecraft:deepslate_coal_ore"},
+        {"minecraft:deepslate_iron_ore","minecraft:deepslate_iron_ore"},
+        {"minecraft:deepslate_gold_ore","minecraft:deepslate_gold_ore"},
+        {"minecraft:deepslate_diamond_ore","minecraft:deepslate_diamond_ore"},
+        {"minecraft:deepslate_emerald_ore","minecraft:deepslate_emerald_ore"},
+        {"minecraft:deepslate_lapis_ore","minecraft:deepslate_lapis_ore"},
+        {"minecraft:deepslate_redstone_ore","minecraft:deepslate_redstone_ore"},
+        {"minecraft:deepslate_copper_ore","minecraft:deepslate_copper_ore"},
+        // Nether ores
+        {"minecraft:nether_gold_ore","minecraft:nether_gold_ore"},
+        {"minecraft:nether_quartz_ore","minecraft:quartz_ore"},
+        {"minecraft:ancient_debris","minecraft:ancient_debris"},
+        // Functional blocks
+        {"minecraft:crafting_table","minecraft:crafting_table"},
+        {"minecraft:furnace","minecraft:furnace"},
+        {"minecraft:blast_furnace","minecraft:blast_furnace"},
+        {"minecraft:smoker","minecraft:smoker"},
+        {"minecraft:chest","minecraft:chest"},
+        {"minecraft:trapped_chest","minecraft:trapped_chest"},
+        {"minecraft:ender_chest","minecraft:ender_chest"},
+        {"minecraft:barrel","minecraft:barrel"},
+        {"minecraft:shulker_box","minecraft:shulker_box"},
+        {"minecraft:anvil","minecraft:anvil"},
+        {"minecraft:enchanting_table","minecraft:enchanting_table"},
+        {"minecraft:bookshelf","minecraft:bookshelf"},
+        {"minecraft:jukebox","minecraft:jukebox"},
+        {"minecraft:beacon","minecraft:beacon"},
+        {"minecraft:brewing_stand","minecraft:brewing_stand"},
+        {"minecraft:cauldron","minecraft:cauldron"},
+        {"minecraft:hopper","minecraft:hopper"},
+        {"minecraft:dropper","minecraft:dropper"},
+        {"minecraft:dispenser","minecraft:dispenser"},
+        {"minecraft:observer","minecraft:observer"},
+        {"minecraft:piston","minecraft:piston"},
+        {"minecraft:sticky_piston","minecraft:sticky_piston"},
+        {"minecraft:grindstone","minecraft:grindstone"},
+        {"minecraft:cartography_table","minecraft:cartography_table"},
+        {"minecraft:fletching_table","minecraft:fletching_table"},
+        {"minecraft:smithing_table","minecraft:smithing_table"},
+        {"minecraft:loom","minecraft:loom"},
+        {"minecraft:stonecutter","minecraft:stonecutter"},
+        {"minecraft:composter","minecraft:composter"},
+        {"minecraft:bell","minecraft:bell"},
+        {"minecraft:lectern","minecraft:lectern"},
+        {"minecraft:beehive","minecraft:beehive"},
+        {"minecraft:bee_nest","minecraft:bee_nest"},
+        // Redstone
+        {"minecraft:redstone_wire","minecraft:redstone_wire"},
+        {"minecraft:redstone_torch","minecraft:redstone_torch"},
+        {"minecraft:lever","minecraft:lever"},
+        {"minecraft:stone_button","minecraft:stone_button"},
+        {"minecraft:oak_button","minecraft:wooden_button"},
+        {"minecraft:stone_pressure_plate","minecraft:stone_pressure_plate"},
+        {"minecraft:oak_pressure_plate","minecraft:wooden_pressure_plate"},
+        {"minecraft:repeater","minecraft:repeater"},
+        {"minecraft:comparator","minecraft:comparator"},
+        {"minecraft:daylight_detector","minecraft:daylight_detector"},
+        {"minecraft:tripwire_hook","minecraft:tripwire_hook"},
+        {"minecraft:target","minecraft:target"},
+        {"minecraft:lightning_rod","minecraft:lightning_rod"},
+        // Glass
+        {"minecraft:glass","minecraft:glass"},
+        {"minecraft:glass_pane","minecraft:glass_pane"},
+        {"minecraft:tinted_glass","minecraft:tinted_glass"},
+        // Sand / gravel / concrete
+        {"minecraft:sand","minecraft:sand"},
+        {"minecraft:red_sand","minecraft:sand"},
+        {"minecraft:gravel","minecraft:gravel"},
+        {"minecraft:white_concrete","minecraft:concrete"},
+        {"minecraft:white_concrete_powder","minecraft:concrete_powder"},
+        // Ice
+        {"minecraft:ice","minecraft:ice"},
+        {"minecraft:packed_ice","minecraft:packed_ice"},
+        {"minecraft:blue_ice","minecraft:blue_ice"},
+        {"minecraft:frosted_ice","minecraft:frosted_ice"},
+        // Misc terrain
+        {"minecraft:snow_block","minecraft:snow"},
+        {"minecraft:clay","minecraft:clay"},
+        {"minecraft:netherrack","minecraft:netherrack"},
+        {"minecraft:soul_sand","minecraft:soul_sand"},
+        {"minecraft:soul_soil","minecraft:soul_soil"},
+        {"minecraft:glowstone","minecraft:glowstone"},
+        {"minecraft:obsidian","minecraft:obsidian"},
+        {"minecraft:crying_obsidian","minecraft:crying_obsidian"},
+        {"minecraft:bedrock","minecraft:bedrock"},
+        {"minecraft:end_stone","minecraft:end_stone"},
+        {"minecraft:end_stone_bricks","minecraft:end_brick"},
+        {"minecraft:purpur_block","minecraft:purpur_block"},
+        {"minecraft:nether_bricks","minecraft:nether_brick"},
+        {"minecraft:red_nether_bricks","minecraft:red_nether_brick"},
+        {"minecraft:quartz_block","minecraft:quartz_block"},
+        {"minecraft:prismarine","minecraft:prismarine"},
+        {"minecraft:sea_lantern","minecraft:sea_lantern"},
+        {"minecraft:magma_block","minecraft:magma"},
+        {"minecraft:shroomlight","minecraft:shroomlight"},
+        {"minecraft:blackstone","minecraft:blackstone"},
+        {"minecraft:basalt","minecraft:basalt"},
+        {"minecraft:polished_basalt","minecraft:polished_basalt"},
+        {"minecraft:calcite","minecraft:calcite"},
+        {"minecraft:tuff","minecraft:tuff"},
+        {"minecraft:dripstone_block","minecraft:dripstone_block"},
+        {"minecraft:moss_block","minecraft:moss_block"},
+        {"minecraft:rooted_dirt","minecraft:dirt_with_roots"},
+        {"minecraft:deepslate","minecraft:deepslate"},
+        {"minecraft:cobbled_deepslate","minecraft:cobbled_deepslate"},
+        {"minecraft:sculk","minecraft:sculk"},
+        {"minecraft:sculk_catalyst","minecraft:sculk_catalyst"},
+        {"minecraft:sculk_shrieker","minecraft:sculk_shrieker"},
+        {"minecraft:sculk_sensor","minecraft:sculk_sensor"},
+        {"minecraft:amethyst_block","minecraft:amethyst_block"},
+        {"minecraft:budding_amethyst","minecraft:budding_amethyst"},
+        // Plants
+        {"minecraft:grass","minecraft:tallgrass"},
+        {"minecraft:fern","minecraft:tallgrass"},
+        {"minecraft:dead_bush","minecraft:deadbush"},
+        {"minecraft:dandelion","minecraft:yellow_flower"},
+        {"minecraft:poppy","minecraft:red_flower"},
+        {"minecraft:cactus","minecraft:cactus"},
+        {"minecraft:sugar_cane","minecraft:reeds"},
+        {"minecraft:bamboo","minecraft:bamboo"},
+        {"minecraft:vine","minecraft:vine"},
+        {"minecraft:lily_pad","minecraft:waterlily"},
+        {"minecraft:kelp","minecraft:kelp"},
+        {"minecraft:sea_pickle","minecraft:sea_pickle"},
+        {"minecraft:wheat","minecraft:wheat"},
+        {"minecraft:potatoes","minecraft:potatoes"},
+        {"minecraft:carrots","minecraft:carrots"},
+        {"minecraft:beetroots","minecraft:beetroot"},
+        {"minecraft:melon","minecraft:melon_block"},
+        {"minecraft:pumpkin","minecraft:pumpkin"},
+        // Fluids
+        {"minecraft:water","minecraft:water"},
+        {"minecraft:lava","minecraft:lava"},
+        // Air
+        {"minecraft:air","minecraft:air"},
+        {"minecraft:cave_air","minecraft:air"},
+        {"minecraft:void_air","minecraft:air"},
+    };
 
-bool BlockStateMapper::loadMappings(const std::string& mappingsFile) {
-    my_mod::MyMod::getInstance().getSelf().getLogger().info("Loading mappings: " + mappingsFile);
+    // Property remaps (Java prop name -> Bedrock prop name)
+    propertyMappings["minecraft:oak_log"] = {{"axis","pillar_axis"}};
+    propertyMappings["minecraft:stone"]   = {{"stone_type","stone_type"}};
+    propertyMappings["minecraft:dirt"]    = {{"dirt_type","dirt_type"}};
+    propertyMappings["minecraft:piston"]  = {{"facing","facing_direction"},{"extended","extended"}};
+    propertyMappings["minecraft:repeater"]= {{"delay","repeater_delay"},{"facing","direction"},{"powered","powered"}};
+    propertyMappings["minecraft:comparator"]={{"facing","direction"},{"mode","output_subtract_bit"},{"powered","output_lit_bit"}};
+
+    auto& logger = my_mod::MyMod::getInstance().getSelf().getLogger();
+    logger.info("BlockStateMapper: " + std::to_string(blockNameMappings.size()) + " blocks, " +
+                std::to_string(propertyMappings.size()) + " property remaps loaded");
     return true;
 }
 
-BlockStateMapper::BedrockBlockState BlockStateMapper::forgeToBedrockBlockState(const ForgeBlockState& forgeState) {
-    BedrockBlockState bedrockState;
-    bedrockState.name = mapBlockName(forgeState.name);
-
-    auto it = propertyMappings.find(forgeState.name);
-    if (it != propertyMappings.end()) {
-        for (const auto& [forgeKey, forgeVal] : forgeState.properties) {
-            if (it->second.count(forgeKey)) {
-                bedrockState.properties[it->second[forgeKey]] = forgeVal;
-            } else {
-                bedrockState.properties[forgeKey] = forgeVal;
-            }
-        }
-    } else {
-        bedrockState.properties = forgeState.properties;
-    }
-
-    return bedrockState;
-}
-
-BlockStateMapper::ForgeBlockState BlockStateMapper::bedrockToForgeBlockState(const BedrockBlockState& bedrockState) {
-    ForgeBlockState forgeState;
-
-    for (const auto& [forgeName, bedrockName] : blockNameMappings) {
-        if (bedrockName == bedrockState.name) {
-            forgeState.name = forgeName;
-            break;
-        }
-    }
-    if (forgeState.name.empty()) {
-        forgeState.name = bedrockState.name;
-    }
-
-    forgeState.properties = bedrockState.properties;
-    return forgeState;
-}
-
 std::string BlockStateMapper::mapBlockName(const std::string& forgeName) {
-    if (blockNameMappings.count(forgeName)) {
-        return blockNameMappings[forgeName];
-    }
+    auto it = blockNameMappings.find(forgeName);
+    if (it != blockNameMappings.end()) return it->second;
+    // Passthrough — mod blocks keep their namespaced ID
     return forgeName;
 }
 
+BlockStateMapper::BedrockBlockState BlockStateMapper::forgeToBedrockBlockState(const ForgeBlockState& fs) {
+    BedrockBlockState out;
+    out.name = mapBlockName(fs.name);
+    auto remap = propertyMappings.find(fs.name);
+    for (const auto& [k, v] : fs.properties) {
+        if (remap != propertyMappings.end() && remap->second.count(k))
+            out.properties[remap->second.at(k)] = v;
+        else
+            out.properties[k] = v;
+    }
+    return out;
+}
+
+BlockStateMapper::ForgeBlockState BlockStateMapper::bedrockToForgeBlockState(const BedrockBlockState& bs) {
+    ForgeBlockState out;
+    for (const auto& [forge, bedrock] : blockNameMappings)
+        if (bedrock == bs.name) { out.name = forge; break; }
+    if (out.name.empty()) out.name = bs.name;
+    out.properties = bs.properties;
+    return out;
+}
+
 // ============================================================================
-// ENTITY TRACKER - STATIC INITIALIZATION
+// ENTITY TRACKER
 // ============================================================================
 
-std::map<jlong, void*> EntityTracker::entityIdToBedrockMap;
-std::map<void*, jlong> EntityTracker::bedrockToEntityIdMap;
+std::map<jlong, void*>   EntityTracker::entityIdToBedrockMap;
+std::map<void*, jlong>   EntityTracker::bedrockToEntityIdMap;
 std::map<jlong, jobject> EntityTracker::entityIdToJavaRefMap;
-
-// ============================================================================
-// ENTITY TRACKER - IMPLEMENTATION
-// ============================================================================
 
 jlong EntityTracker::getEntityId(JNIEnv* env, jobject javaEntity) {
     if (!env || !javaEntity) return 0;
-    
-    // Use System.identityHashCode for unique ID (works across JNI calls)
-    jclass systemClass = env->FindClass("java/lang/System");
-    if (!systemClass) {
-        return reinterpret_cast<jlong>(javaEntity);  // Fallback
-    }
-    
-    jmethodID hashCodeMethod = env->GetStaticMethodID(systemClass, "identityHashCode", "(Ljava/lang/Object;)I");
-    if (!hashCodeMethod) {
-        return reinterpret_cast<jlong>(javaEntity);  // Fallback
-    }
-    
-    jint hashCode = env->CallStaticIntMethod(systemClass, hashCodeMethod, javaEntity);
-    return static_cast<jlong>(hashCode);
+    jclass sys = env->FindClass("java/lang/System");
+    if (!sys) return reinterpret_cast<jlong>(javaEntity);
+    jmethodID m = env->GetStaticMethodID(sys, "identityHashCode", "(Ljava/lang/Object;)I");
+    env->DeleteLocalRef(sys);
+    if (!m) return reinterpret_cast<jlong>(javaEntity);
+    return static_cast<jlong>(env->CallStaticIntMethod(sys, m, javaEntity));
 }
 
 void EntityTracker::registerEntity(JNIEnv* env, jobject javaEntity, void* bedrockActor) {
-    if (!env) {
-        return;
-    }
-
-    jlong entityId = getEntityId(env, javaEntity);
-    jobject globalRef = env->NewGlobalRef(javaEntity);
-
-    entityIdToBedrockMap[entityId] = bedrockActor;
-    bedrockToEntityIdMap[bedrockActor] = entityId;
-    entityIdToJavaRefMap[entityId] = globalRef;
+    if (!env || !javaEntity || !bedrockActor) return;
+    jlong id = getEntityId(env, javaEntity);
+    auto old = entityIdToJavaRefMap.find(id);
+    if (old != entityIdToJavaRefMap.end()) env->DeleteGlobalRef(old->second);
+    entityIdToBedrockMap[id]         = bedrockActor;
+    bedrockToEntityIdMap[bedrockActor] = id;
+    entityIdToJavaRefMap[id]         = env->NewGlobalRef(javaEntity);
 }
 
 void* EntityTracker::getBedrockActor(JNIEnv* env, jobject javaEntity) {
     if (!env) return nullptr;
-    jlong entityId = getEntityId(env, javaEntity);
-    auto it = entityIdToBedrockMap.find(entityId);
+    auto it = entityIdToBedrockMap.find(getEntityId(env, javaEntity));
     return it != entityIdToBedrockMap.end() ? it->second : nullptr;
 }
 
 jobject EntityTracker::getJavaEntity(void* bedrockActor) {
     auto it = bedrockToEntityIdMap.find(bedrockActor);
-    if (it != bedrockToEntityIdMap.end()) {
-        auto refIt = entityIdToJavaRefMap.find(it->second);
-        return refIt != entityIdToJavaRefMap.end() ? refIt->second : nullptr;
-    }
-    return nullptr;
+    if (it == bedrockToEntityIdMap.end()) return nullptr;
+    auto r = entityIdToJavaRefMap.find(it->second);
+    return r != entityIdToJavaRefMap.end() ? r->second : nullptr;
 }
 
 void EntityTracker::unregisterEntity(JNIEnv* env, jobject javaEntity) {
     if (!env) return;
-    
-    jlong entityId = getEntityId(env, javaEntity);
-    auto it = entityIdToBedrockMap.find(entityId);
-    
-    if (it != entityIdToBedrockMap.end()) {
-        void* bedrockActor = it->second;
-        
-        bedrockToEntityIdMap.erase(bedrockActor);
-        entityIdToBedrockMap.erase(it);
-        
-        auto refIt = entityIdToJavaRefMap.find(entityId);
-        if (refIt != entityIdToJavaRefMap.end()) {
-            env->DeleteGlobalRef(refIt->second);
-            entityIdToJavaRefMap.erase(refIt);
-        }
+    jlong id = getEntityId(env, javaEntity);
+    auto it = entityIdToBedrockMap.find(id);
+    if (it == entityIdToBedrockMap.end()) return;
+    bedrockToEntityIdMap.erase(it->second);
+    entityIdToBedrockMap.erase(it);
+    auto r = entityIdToJavaRefMap.find(id);
+    if (r != entityIdToJavaRefMap.end()) {
+        env->DeleteGlobalRef(r->second);
+        entityIdToJavaRefMap.erase(r);
     }
 }
 
 bool EntityTracker::hasEntity(JNIEnv* env, jobject javaEntity) {
     if (!env) return false;
-    jlong entityId = getEntityId(env, javaEntity);
-    return entityIdToBedrockMap.count(entityId) > 0;
+    return entityIdToBedrockMap.count(getEntityId(env, javaEntity)) > 0;
 }
 
 // ============================================================================
-// NATIVE SHADOW ADAPTER - STATIC INITIALIZATION
+// NATIVE SHADOW ADAPTER
 // ============================================================================
 
 JNINativeMethod NativeShadowAdapter::nativeMethods[] = {
-    {(char*)"setPos", (char*)"(DDD)V", (void*)&NativeShadowAdapter::nativeEntitySetPos},
-    {(char*)"getPos", (char*)"()[D", (void*)&NativeShadowAdapter::nativeEntityGetPos},
-    {(char*)"addTag", (char*)"(Ljava/lang/String;)V", (void*)&NativeShadowAdapter::nativeEntityAddTag},
+    {(char*)"setPos",   (char*)"(DDD)V",   (void*)&nativeEntitySetPos},
+    {(char*)"getPos",   (char*)"()[D",     (void*)&nativeEntityGetPos},
+    {(char*)"addTag",   (char*)"(Ljava/lang/String;)V", (void*)&nativeEntityAddTag},
     {(char*)"setBlock", (char*)"(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/BlockState;I)Z",
-     (void*)&NativeShadowAdapter::nativeBlockSetBlock},
+                                           (void*)&nativeBlockSetBlock},
     {(char*)"getBlock", (char*)"(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/BlockState;",
-     (void*)&NativeShadowAdapter::nativeBlockGetBlock},
+                                           (void*)&nativeBlockGetBlock},
 };
-
 int NativeShadowAdapter::nativeMethodCount = sizeof(nativeMethods) / sizeof(nativeMethods[0]);
 
-// ============================================================================
-// NATIVE SHADOW ADAPTER - IMPLEMENTATION
-// ============================================================================
-
-bool NativeShadowAdapter::registerNativeMethods(JNIEnv* env, const std::string& modPackageName) {
-    std::string classPath = modPackageName;
-    std::replace(classPath.begin(), classPath.end(), '.', '/');
-    classPath += "/ForgeEntityAdapter";
-
-    jclass clazz = env->FindClass(classPath.c_str());
-    if (!clazz) {
-        return false;
-    }
-
-    jint result = env->RegisterNatives(clazz, nativeMethods, nativeMethodCount);
-    if (result != JNI_OK) {
-        return false;
-    }
-
-    return true;
+bool NativeShadowAdapter::registerNativeMethods(JNIEnv* env, const std::string& pkg) {
+    std::string path = pkg;
+    std::replace(path.begin(), path.end(), '.', '/');
+    path += "/ForgeEntityAdapter";
+    jclass c = env->FindClass(path.c_str());
+    if (!c) { env->ExceptionClear(); return false; }
+    bool ok = env->RegisterNatives(c, nativeMethods, nativeMethodCount) == JNI_OK;
+    env->DeleteLocalRef(c);
+    return ok;
 }
 
 void JNICALL NativeShadowAdapter::nativeEntitySetPos(JNIEnv* env, jobject entity, jdouble x, jdouble y, jdouble z) {
-    void* bedrockActor = EntityTracker::getBedrockActor(env, entity);
-    (void)x; (void)y; (void)z;
-    if (!bedrockActor) {
-        return;
-    }
-
-    auto actorSetPos = BedrockSymbolResolver::getActorSetPos();
-    if (actorSetPos) {
-        BedrockPointerHelper::Vec3 vec = BedrockPointerHelper::makeVec3(x, y, z);
-        actorSetPos(bedrockActor, &vec);
-    }
+    void* actor = EntityTracker::getBedrockActor(env, entity);
+    if (!actor) return;
+    auto fn = BedrockSymbolResolver::getActorSetPos();
+    if (!fn) return;
+    BedrockPointerHelper::Vec3 v = BedrockPointerHelper::makeVec3(x, y, z);
+    fn(actor, &v);
 }
 
 jobject JNICALL NativeShadowAdapter::nativeEntityGetPos(JNIEnv* env, jobject entity) {
-    void* bedrockActor = EntityTracker::getBedrockActor(env, entity);
-    if (!bedrockActor) {
-        return nullptr;
-    }
-
-    auto actorGetPos = BedrockSymbolResolver::getActorGetPos();
-    if (actorGetPos) {
-        BedrockPointerHelper::Vec3 vec = {0, 0, 0};
-        actorGetPos(bedrockActor, &vec);
-        return BedrockPointerHelper::vec3ToJDoubleArray(env, vec);
-    }
-
-    return nullptr;
+    void* actor = EntityTracker::getBedrockActor(env, entity);
+    if (!actor) return nullptr;
+    auto fn = BedrockSymbolResolver::getActorGetPos();
+    if (!fn) return nullptr;
+    BedrockPointerHelper::Vec3 v{0,0,0};
+    fn(actor, &v);
+    return BedrockPointerHelper::vec3ToJDoubleArray(env, v);
 }
 
 void JNICALL NativeShadowAdapter::nativeEntityAddTag(JNIEnv* env, jobject entity, jstring tag) {
-    void* bedrockActor = EntityTracker::getBedrockActor(env, entity);
-    if (!bedrockActor) {
-        return;
-    }
-
-    const char* tagStr = env->GetStringUTFChars(tag, nullptr);
-    auto actorAddTag = BedrockSymbolResolver::getActorAddTag();
-    if (actorAddTag) {
-        actorAddTag(bedrockActor, tagStr);
-    }
-    env->ReleaseStringUTFChars(tag, tagStr);
+    void* actor = EntityTracker::getBedrockActor(env, entity);
+    if (!actor) return;
+    auto fn = BedrockSymbolResolver::getActorAddTag();
+    if (!fn) return;
+    const char* s = env->GetStringUTFChars(tag, nullptr);
+    fn(actor, s);
+    env->ReleaseStringUTFChars(tag, s);
 }
 
-jboolean JNICALL NativeShadowAdapter::nativeBlockSetBlock(
-    JNIEnv* env,
-    jobject level,
-    jobject blockPos,
-    jobject blockState,
-    jint flags) {
-    
-    auto pos = BedrockPointerHelper::extractBlockPos(env, blockPos);
+jboolean JNICALL NativeShadowAdapter::nativeBlockSetBlock(JNIEnv* env, jobject, jobject blockPos, jobject blockState, jint) {
+    auto pos  = BedrockPointerHelper::extractBlockPos(env, blockPos);
+    auto bct  = BedrockSymbolResolver::getBlockCreate();
+    auto bst  = BedrockSymbolResolver::getBlockSetType();
+    if (!bct || !bst) return JNI_FALSE;
 
-    // Get Block::create function to create block from string
-    auto blockCreate = BedrockSymbolResolver::getBlockCreate();
-    auto blockSetType = BedrockSymbolResolver::getBlockSetType();
-    
-    if (!blockCreate || !blockSetType) {
-        return JNI_FALSE;
-    }
+    jclass bsc  = env->GetObjectClass(blockState);
+    jmethodID gt = env->GetMethodID(bsc, "getType", "()Lnet/minecraft/world/level/block/Block;");
+    jobject bo  = env->CallObjectMethod(blockState, gt);
+    jclass bc   = env->GetObjectClass(bo);
+    jmethodID gn = env->GetMethodID(bc, "getName", "()Ljava/lang/String;");
+    jstring jn  = (jstring)env->CallObjectMethod(bo, gn);
+    const char* name = env->GetStringUTFChars(jn, nullptr);
+    std::string bedrockName = BlockStateMapper::mapBlockName(name);
+    env->ReleaseStringUTFChars(jn, name);
+    env->DeleteLocalRef(bsc); env->DeleteLocalRef(bo); env->DeleteLocalRef(bc); env->DeleteLocalRef(jn);
 
-    // CRITICAL FIX: Create Block object first, then call setBlock on BlockSource
-    // Get the block name from the Java BlockState object
-    jclass blockStateClass = env->GetObjectClass(blockState);
-    jmethodID getTypeMethod = env->GetMethodID(blockStateClass, "getType", "()Lnet/minecraft/world/level/block/Block;");
-    jobject blockObj = env->CallObjectMethod(blockState, getTypeMethod);
-    
-    jclass blockClass = env->GetObjectClass(blockObj);
-    jmethodID getNameMethod = env->GetMethodID(blockClass, "getName", "()Ljava/lang/String;");
-    jstring blockName = (jstring)env->CallObjectMethod(blockObj, getNameMethod);
-    
-    const char* blockNameStr = env->GetStringUTFChars(blockName, nullptr);
-    
-    // Create the Block object using Block::create
-    void* bedrockBlock = blockCreate(blockNameStr);
-    if (!bedrockBlock) {
-        env->ReleaseStringUTFChars(blockName, blockNameStr);
-        return JNI_FALSE;
-    }
-    
-    // Call setBlock on BlockSource (nullptr for now - would need dimension/level object)
-    // In production, extract dimension from level object
-    blockSetType(nullptr, pos.x, pos.y, pos.z, bedrockBlock);
-    
-    env->ReleaseStringUTFChars(blockName, blockNameStr);
+    void* block = bct(bedrockName.c_str());
+    if (!block) return JNI_FALSE;
+    bst(nullptr, pos.x, pos.y, pos.z, block);
     return JNI_TRUE;
 }
 
-jobject JNICALL NativeShadowAdapter::nativeBlockGetBlock(JNIEnv* env, jobject level, jobject blockPos) {
-    auto pos = BedrockPointerHelper::extractBlockPos(env, blockPos);
-    return nullptr;
-}
-
-jobject JNICALL NativeShadowAdapter::nativeItemUse(
-    JNIEnv* env,
-    jobject item,
-    jobject level,
-    jobject player,
-    jint hand) {
-    
-    (void)env; (void)item; (void)level; (void)player; (void)hand;
-    return nullptr;
-}
+jobject JNICALL NativeShadowAdapter::nativeBlockGetBlock(JNIEnv*, jobject, jobject) { return nullptr; }
+jobject JNICALL NativeShadowAdapter::nativeItemUse(JNIEnv*, jobject, jobject, jobject, jint) { return nullptr; }
 
 // ============================================================================
-// BEDROCK POINTER HELPER - IMPLEMENTATION
+// BEDROCK POINTER HELPER
 // ============================================================================
 
 BedrockPointerHelper::Vec3 BedrockPointerHelper::makeVec3(double x, double y, double z) {
     return {(float)x, (float)y, (float)z};
 }
-
-jdoubleArray BedrockPointerHelper::vec3ToJDoubleArray(JNIEnv* env, const Vec3& vec) {
-    jdoubleArray arr = env->NewDoubleArray(3);
-    jdouble data[] = {vec.x, vec.y, vec.z};
-    env->SetDoubleArrayRegion(arr, 0, 3, data);
-    return arr;
+jdoubleArray BedrockPointerHelper::vec3ToJDoubleArray(JNIEnv* env, const Vec3& v) {
+    jdoubleArray a = env->NewDoubleArray(3);
+    jdouble d[] = {v.x, v.y, v.z};
+    env->SetDoubleArrayRegion(a, 0, 3, d);
+    return a;
 }
-
-BedrockPointerHelper::BlockPos BedrockPointerHelper::extractBlockPos(JNIEnv* env, jobject blockPosObj) {
-    jclass blockPosClass = env->GetObjectClass(blockPosObj);
-    jfieldID xField = env->GetFieldID(blockPosClass, "x", "I");
-    jfieldID yField = env->GetFieldID(blockPosClass, "y", "I");
-    jfieldID zField = env->GetFieldID(blockPosClass, "z", "I");
-
-    BlockPos pos;
-    pos.x = env->GetIntField(blockPosObj, xField);
-    pos.y = env->GetIntField(blockPosObj, yField);
-    pos.z = env->GetIntField(blockPosObj, zField);
-
-    return pos;
+BedrockPointerHelper::BlockPos BedrockPointerHelper::extractBlockPos(JNIEnv* env, jobject obj) {
+    jclass c = env->GetObjectClass(obj);
+    BlockPos p;
+    p.x = env->GetIntField(obj, env->GetFieldID(c, "x", "I"));
+    p.y = env->GetIntField(obj, env->GetFieldID(c, "y", "I"));
+    p.z = env->GetIntField(obj, env->GetFieldID(c, "z", "I"));
+    env->DeleteLocalRef(c);
+    return p;
 }
-
 jobject BedrockPointerHelper::createBlockPos(JNIEnv* env, int x, int y, int z) {
-    jclass blockPosClass = env->FindClass("net/minecraft/core/BlockPos");
-    jmethodID constructor = env->GetMethodID(blockPosClass, "<init>", "(III)V");
-
-    return env->NewObject(blockPosClass, constructor, x, y, z);
+    jclass c = env->FindClass("net/minecraft/core/BlockPos");
+    jobject o = env->NewObject(c, env->GetMethodID(c, "<init>", "(III)V"), x, y, z);
+    env->DeleteLocalRef(c);
+    return o;
 }
 
 // ============================================================================
-// FORGE EVENT FORWARDER - STATIC INITIALIZATION
+// FORGE EVENT FORWARDER
+// Now with: chat, death, respawn, entity hurt, entity die, chunk load,
+// mob spawn, server start/stop — all async via JNI queue
 // ============================================================================
 
 std::vector<ForgeEventForwarder::PlayerEventHandler> ForgeEventForwarder::playerJoinHandlers;
 std::vector<ForgeEventForwarder::PlayerEventHandler> ForgeEventForwarder::playerLeaveHandlers;
-std::vector<ForgeEventForwarder::BlockEventHandler> ForgeEventForwarder::blockBreakHandlers;
-std::vector<ForgeEventForwarder::BlockEventHandler> ForgeEventForwarder::blockPlaceHandlers;
-std::vector<jobject> ForgeEventForwarder::registeredForgeListeners;
+std::vector<ForgeEventForwarder::BlockEventHandler>  ForgeEventForwarder::blockBreakHandlers;
+std::vector<ForgeEventForwarder::BlockEventHandler>  ForgeEventForwarder::blockPlaceHandlers;
+std::vector<jobject>                                 ForgeEventForwarder::registeredForgeListeners;
+
+void ForgeEventForwarder::registerLeviLaminaHooks() {
+    using namespace ll::event;
+    auto& bus = EventBus::getInstance();
+
+    // --- Player Join ---
+    bus.emplaceListener<PlayerJoinEvent>([](PlayerJoinEvent& ev) {
+        std::string uuid = ev.self().getUuid().asString();
+        std::string name = ev.self().getRealName();
+        forwardPlayerJoinEvent(uuid);
+        fireJavaBridge("PlayerJoin", [uuid, name](JNIEnv* env, jclass cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
+                              "onPlayerJoin", "(Ljava/lang/String;Ljava/lang/String;)V");
+            if (!m) return;
+            jstring ju = env->NewStringUTF(uuid.c_str());
+            jstring jn = env->NewStringUTF(name.c_str());
+            env->CallStaticVoidMethod(cls, m, ju, jn);
+            env->DeleteLocalRef(ju); env->DeleteLocalRef(jn);
+        });
+    });
+
+    // --- Player Leave ---
+    bus.emplaceListener<PlayerLeaveEvent>([](PlayerLeaveEvent& ev) {
+        std::string uuid = ev.self().getUuid().asString();
+        forwardPlayerLeaveEvent(uuid);
+        // Clean up entity tracking
+        JNIThreadManager::ThreadGuard guard;
+        if (JNIEnv* env = guard.getEnv()) {
+            jobject ref = EntityTracker::getJavaEntity(&ev.self());
+            if (ref) EntityTracker::unregisterEntity(env, ref);
+        }
+        fireJavaBridge("PlayerLeave", [uuid](JNIEnv* env, jclass cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
+                              "onPlayerLeave", "(Ljava/lang/String;)V");
+            if (!m) return;
+            jstring ju = env->NewStringUTF(uuid.c_str());
+            env->CallStaticVoidMethod(cls, m, ju);
+            env->DeleteLocalRef(ju);
+        });
+    });
+
+    // --- Player Chat ---
+    bus.emplaceListener<PlayerChatEvent>([](PlayerChatEvent& ev) {
+        std::string uuid    = ev.self().getUuid().asString();
+        std::string message = ev.message();
+        fireJavaBridge("PlayerChat", [uuid, message](JNIEnv* env, jclass cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
+                              "onPlayerChat", "(Ljava/lang/String;Ljava/lang/String;)V");
+            if (!m) return;
+            jstring ju = env->NewStringUTF(uuid.c_str());
+            jstring jm = env->NewStringUTF(message.c_str());
+            env->CallStaticVoidMethod(cls, m, ju, jm);
+            env->DeleteLocalRef(ju); env->DeleteLocalRef(jm);
+        });
+    });
+
+    // --- Player Death ---
+    bus.emplaceListener<PlayerDieEvent>([](PlayerDieEvent& ev) {
+        std::string uuid  = ev.self().getUuid().asString();
+        std::string cause = std::to_string((int)ev.source().getCause());
+        fireJavaBridge("PlayerDie", [uuid, cause](JNIEnv* env, jclass cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
+                              "onPlayerDeath", "(Ljava/lang/String;Ljava/lang/String;)V");
+            if (!m) return;
+            jstring ju = env->NewStringUTF(uuid.c_str());
+            jstring jc = env->NewStringUTF(cause.c_str());
+            env->CallStaticVoidMethod(cls, m, ju, jc);
+            env->DeleteLocalRef(ju); env->DeleteLocalRef(jc);
+        });
+    });
+
+    // --- Player Respawn ---
+    bus.emplaceListener<PlayerRespawnEvent>([](PlayerRespawnEvent& ev) {
+        std::string uuid = ev.self().getUuid().asString();
+        fireJavaBridge("PlayerRespawn", [uuid](JNIEnv* env, jclass cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
+                              "onPlayerRespawn", "(Ljava/lang/String;)V");
+            if (!m) return;
+            jstring ju = env->NewStringUTF(uuid.c_str());
+            env->CallStaticVoidMethod(cls, m, ju);
+            env->DeleteLocalRef(ju);
+        });
+    });
+
+    // --- Player Attack ---
+    bus.emplaceListener<PlayerAttackEvent>([](PlayerAttackEvent& ev) {
+        std::string uuid   = ev.self().getUuid().asString();
+        std::string target = ev.target().getTypeName();
+        fireJavaBridge("PlayerAttack", [uuid, target](JNIEnv* env, jclass cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
+                              "onPlayerAttack", "(Ljava/lang/String;Ljava/lang/String;)V");
+            if (!m) return;
+            jstring ju = env->NewStringUTF(uuid.c_str());
+            jstring jt = env->NewStringUTF(target.c_str());
+            env->CallStaticVoidMethod(cls, m, ju, jt);
+            env->DeleteLocalRef(ju); env->DeleteLocalRef(jt);
+        });
+    });
+
+    // --- Player Interact Block ---
+    bus.emplaceListener<PlayerInteractBlockEvent>([](PlayerInteractBlockEvent& ev) {
+        std::string uuid  = ev.self().getUuid().asString();
+        auto& pos         = ev.pos();
+        std::string block = ev.block().getTypeName();
+        fireJavaBridge("PlayerInteractBlock", [uuid, x=pos.x, y=pos.y, z=pos.z, block](JNIEnv* env, jclass cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
+                              "onPlayerInteractBlock", "(Ljava/lang/String;IIILjava/lang/String;)V");
+            if (!m) return;
+            jstring ju = env->NewStringUTF(uuid.c_str());
+            jstring jb = env->NewStringUTF(block.c_str());
+            env->CallStaticVoidMethod(cls, m, ju, x, y, z, jb);
+            env->DeleteLocalRef(ju); env->DeleteLocalRef(jb);
+        });
+    });
+
+    // --- Player Pick Up Item ---
+    bus.emplaceListener<PlayerPickUpItemEvent>([](PlayerPickUpItemEvent& ev) {
+        std::string uuid = ev.self().getUuid().asString();
+        std::string item = ev.itemActor().getTypeName();
+        fireJavaBridge("PlayerPickUpItem", [uuid, item](JNIEnv* env, jclass cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
+                              "onPlayerPickupItem", "(Ljava/lang/String;Ljava/lang/String;)V");
+            if (!m) return;
+            jstring ju = env->NewStringUTF(uuid.c_str());
+            jstring ji = env->NewStringUTF(item.c_str());
+            env->CallStaticVoidMethod(cls, m, ju, ji);
+            env->DeleteLocalRef(ju); env->DeleteLocalRef(ji);
+        });
+    });
+
+    // --- Block Break ---
+    bus.emplaceListener<PlayerDestroyBlockEvent>([](PlayerDestroyBlockEvent& ev) {
+        auto& pos = ev.pos();
+        std::string uuid  = ev.self().getUuid().asString();
+        std::string block = ev.self().getDimension().getBlockSourceFromMainChunkLoadState().getBlock(pos).getTypeName();
+        forwardBlockBreakEvent(pos.x, pos.y, pos.z, uuid);
+        fireJavaBridge("BlockBreak", [uuid, x=pos.x, y=pos.y, z=pos.z, block](JNIEnv* env, jclass cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
+                              "onBlockBreak", "(IIILjava/lang/String;Ljava/lang/String;)V");
+            if (!m) return;
+            jstring ju = env->NewStringUTF(uuid.c_str());
+            jstring jb = env->NewStringUTF(block.c_str());
+            env->CallStaticVoidMethod(cls, m, x, y, z, jb, ju);
+            env->DeleteLocalRef(ju); env->DeleteLocalRef(jb);
+        });
+    });
+
+    // --- Block Place ---
+    bus.emplaceListener<PlayerPlacingBlockEvent>([](PlayerPlacingBlockEvent& ev) {
+        auto& pos         = ev.pos();
+        std::string uuid  = ev.self().getUuid().asString();
+        std::string block = ev.block().getTypeName();
+        forwardBlockPlaceEvent(pos.x, pos.y, pos.z, block, uuid);
+        fireJavaBridge("BlockPlace", [uuid, x=pos.x, y=pos.y, z=pos.z, block](JNIEnv* env, jclass cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
+                              "onBlockPlace", "(IIILjava/lang/String;Ljava/lang/String;)V");
+            if (!m) return;
+            jstring ju = env->NewStringUTF(uuid.c_str());
+            jstring jb = env->NewStringUTF(block.c_str());
+            env->CallStaticVoidMethod(cls, m, x, y, z, jb, ju);
+            env->DeleteLocalRef(ju); env->DeleteLocalRef(jb);
+        });
+    });
+
+    // --- Entity Hurt ---
+    bus.emplaceListener<EntityHurtEvent>([](EntityHurtEvent& ev) {
+        std::string type  = ev.self().getTypeName();
+        float       dmg   = ev.damage();
+        std::string cause = std::to_string((int)ev.source().getCause());
+        fireJavaBridge("EntityHurt", [type, dmg, cause](JNIEnv* env, jclass cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
+                              "onEntityHurt", "(Ljava/lang/String;FLjava/lang/String;)V");
+            if (!m) return;
+            jstring jt = env->NewStringUTF(type.c_str());
+            jstring jc = env->NewStringUTF(cause.c_str());
+            env->CallStaticVoidMethod(cls, m, jt, (jfloat)dmg, jc);
+            env->DeleteLocalRef(jt); env->DeleteLocalRef(jc);
+        });
+    });
+
+    // --- Entity Die ---
+    bus.emplaceListener<EntityDieEvent>([](EntityDieEvent& ev) {
+        std::string type  = ev.self().getTypeName();
+        std::string cause = std::to_string((int)ev.source().getCause());
+        fireJavaBridge("EntityDie", [type, cause](JNIEnv* env, jclass cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
+                              "onEntityDeath", "(Ljava/lang/String;Ljava/lang/String;)V");
+            if (!m) return;
+            jstring jt = env->NewStringUTF(type.c_str());
+            jstring jc = env->NewStringUTF(cause.c_str());
+            env->CallStaticVoidMethod(cls, m, jt, jc);
+            env->DeleteLocalRef(jt); env->DeleteLocalRef(jc);
+        });
+    });
+
+    // --- Mob Spawn ---
+    bus.emplaceListener<SpawnMobEvent>([](SpawnMobEvent& ev) {
+        std::string type = ev.self().getTypeName();
+        fireJavaBridge("MobSpawn", [type](JNIEnv* env, jclass cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
+                              "onMobSpawn", "(Ljava/lang/String;)V");
+            if (!m) return;
+            jstring jt = env->NewStringUTF(type.c_str());
+            env->CallStaticVoidMethod(cls, m, jt);
+            env->DeleteLocalRef(jt);
+        });
+    });
+
+    // --- Chunk Loaded ---
+    bus.emplaceListener<ChunkLoadedEvent>([](ChunkLoadedEvent& ev) {
+        auto pos = ev.chunk().getPosition();
+        fireJavaBridge("ChunkLoaded", [cx=pos.x, cz=pos.z](JNIEnv* env, jclass cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
+                              "onChunkLoaded", "(II)V");
+            if (!m) return;
+            env->CallStaticVoidMethod(cls, m, (jint)cx, (jint)cz);
+        });
+    });
+
+    // --- Server Started ---
+    bus.emplaceListener<ServerStartedEvent>([](ServerStartedEvent&) {
+        fireJavaBridge("ServerStarted", [](JNIEnv* env, jclass cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
+                              "onServerStarted", "()V");
+            if (m) env->CallStaticVoidMethod(cls, m);
+        });
+    });
+
+    // --- Server Stopped ---
+    bus.emplaceListener<ServerStoppedEvent>([](ServerStoppedEvent&) {
+        fireJavaBridge("ServerStopped", [](JNIEnv* env, jclass cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
+                              "onServerStopped", "()V");
+            if (m) env->CallStaticVoidMethod(cls, m);
+        });
+    });
+
+    my_mod::MyMod::getInstance().getSelf().getLogger().info(
+        "ForgeEventForwarder: all LeviLamina hooks registered"
+    );
+}
+
+// C++ handler registration
+void ForgeEventForwarder::onPlayerJoin(PlayerEventHandler h)  { playerJoinHandlers.push_back(h); }
+void ForgeEventForwarder::onPlayerLeave(PlayerEventHandler h) { playerLeaveHandlers.push_back(h); }
+void ForgeEventForwarder::onBlockBreak(BlockEventHandler h)   { blockBreakHandlers.push_back(h); }
+void ForgeEventForwarder::onBlockPlace(BlockEventHandler h)   { blockPlaceHandlers.push_back(h); }
+
+void ForgeEventForwarder::forwardPlayerJoinEvent(const std::string& id)  { for (auto& h : playerJoinHandlers)  h(id); }
+void ForgeEventForwarder::forwardPlayerLeaveEvent(const std::string& id) { for (auto& h : playerLeaveHandlers) h(id); }
+void ForgeEventForwarder::forwardBlockBreakEvent(int x,int y,int z,const std::string& id) { for(auto&h:blockBreakHandlers) h(x,y,z,id); }
+void ForgeEventForwarder::forwardBlockPlaceEvent(int x,int y,int z,const std::string& b,const std::string& id) { for(auto&h:blockPlaceHandlers) h(x,y,z,id); }
+void ForgeEventForwarder::registerForgeEventListener(JNIEnv* env,const std::string&,jobject l) {
+    registeredForgeListeners.push_back(env->NewGlobalRef(l));
+}
 
 // ============================================================================
-// FORGE EVENT FORWARDER - IMPLEMENTATION
+// LEVILAMINA HOOKS — low level Bedrock function intercepts
 // ============================================================================
 
-void ForgeEventForwarder::onPlayerJoin(PlayerEventHandler handler) {
-    playerJoinHandlers.push_back(handler);
-}
-
-void ForgeEventForwarder::onPlayerLeave(PlayerEventHandler handler) {
-    playerLeaveHandlers.push_back(handler);
-}
-
-void ForgeEventForwarder::onBlockBreak(BlockEventHandler handler) {
-    blockBreakHandlers.push_back(handler);
-}
-
-void ForgeEventForwarder::onBlockPlace(BlockEventHandler handler) {
-    blockPlaceHandlers.push_back(handler);
-}
-
-void ForgeEventForwarder::forwardPlayerJoinEvent(const std::string& playerId) {
-    for (auto& handler : playerJoinHandlers) {
-        handler(playerId);
+// Hook: intercept chat to let Java mods cancel or modify messages
+LL_AUTO_TYPE_INSTANCE_HOOK(
+    ChatHook,
+    ll::memory::HookPriority::Normal,
+    Player,
+    &Player::chat,
+    void,
+    std::string const& message
+) {
+    // Let Java decide if chat is allowed
+    bool cancelled = false;
+    JNIThreadManager::ThreadGuard guard;
+    JNIEnv* env = guard.getEnv();
+    if (env) {
+        jclass cls = JavaClassCache::getClass(env, "com/example/mod/ForgeEventBridge");
+        if (cls) {
+            jmethodID m = JavaClassCache::getStaticMethod(env,
+                "com/example/mod/ForgeEventBridge", "canChat",
+                "(Ljava/lang/String;Ljava/lang/String;)Z");
+            if (m) {
+                jstring juuid = env->NewStringUTF(this->getUuid().asString().c_str());
+                jstring jmsg  = env->NewStringUTF(message.c_str());
+                cancelled = !env->CallStaticBooleanMethod(cls, m, juuid, jmsg);
+                env->DeleteLocalRef(juuid); env->DeleteLocalRef(jmsg);
+            }
+        }
     }
-}
-
-void ForgeEventForwarder::forwardPlayerLeaveEvent(const std::string& playerId) {
-    for (auto& handler : playerLeaveHandlers) {
-        handler(playerId);
-    }
-}
-
-void ForgeEventForwarder::forwardBlockBreakEvent(int x, int y, int z, const std::string& playerId) {
-    for (auto& handler : blockBreakHandlers) {
-        handler(x, y, z, playerId);
-    }
-}
-
-void ForgeEventForwarder::forwardBlockPlaceEvent(int x, int y, int z, const std::string& blockName, const std::string& playerId) {
-    for (auto& handler : blockPlaceHandlers) {
-        handler(x, y, z, playerId);
-    }
-}
-
-void ForgeEventForwarder::registerForgeEventListener(JNIEnv* env, const std::string& eventClass, jobject listener) {
-    registeredForgeListeners.push_back(env->NewGlobalRef(listener));
+    if (!cancelled) origin(message);
 }
 
 // ============================================================================
-// MODMORPHER MANAGER - STATIC INITIALIZATION
+// FORGE COMMAND BRIDGE
+// /forge <subcommand> — lets admins control the translation layer in-game
 // ============================================================================
 
-bool ModMorpher::initialized = false;
-JavaVM* ModMorpher::cachedJVM = nullptr;
-JNIEnv* ModMorpher::cachedEnv = nullptr;
+static void registerForgeCommands() {
+    using namespace ll::command;
+
+    struct ForgeCmd {
+        enum class Sub { status, reload, mods, gc } sub;
+        std::string modId;
+    };
+
+    auto& cmd = CommandRegistrar::getInstance().getOrCreateCommand(
+        "forge", "Forge-Bedrock translator control"
+    );
+
+    cmd.overload<ForgeCmd>()
+        .text("status")
+        .execute([](CommandOrigin const&, CommandOutput& out, ForgeCmd const&) {
+            auto mods = ModMorpher::getLoadedMods();
+            out.success("ModMorpher: {} | {} forge mod(s) loaded",
+                ModMorpher::isInitialized() ? "RUNNING" : "STOPPED",
+                mods.size());
+            for (auto& m : mods) out.success("  - {}", m);
+        });
+
+    cmd.overload<ForgeCmd>()
+        .text("mods")
+        .execute([](CommandOrigin const&, CommandOutput& out, ForgeCmd const&) {
+            auto mods = ModMorpher::getLoadedMods();
+            if (mods.empty()) { out.success("No Forge mods loaded."); return; }
+            for (auto& m : mods) out.success("  {}", m);
+        });
+
+    cmd.overload<ForgeCmd>()
+        .text("gc")
+        .execute([](CommandOrigin const&, CommandOutput& out, ForgeCmd const&) {
+            enqueueJNICall("ManualGC", [](JNIEnv* env) {
+                jclass rt = env->FindClass("java/lang/Runtime");
+                jmethodID getRt = env->GetStaticMethodID(rt, "getRuntime", "()Ljava/lang/Runtime;");
+                jobject rtInst  = env->CallStaticObjectMethod(rt, getRt);
+                jmethodID gc    = env->GetMethodID(rt, "gc", "()V");
+                env->CallVoidMethod(rtInst, gc);
+                env->DeleteLocalRef(rt); env->DeleteLocalRef(rtInst);
+            });
+            out.success("Java GC triggered.");
+        });
+
+    cmd.overload<ForgeCmd>()
+        .text("reload")
+        .execute([](CommandOrigin const&, CommandOutput& out, ForgeCmd const&) {
+            out.success("Reload not yet implemented — restart server to reload Forge mods.");
+        });
+
+    my_mod::MyMod::getInstance().getSelf().getLogger().info(
+        "ForgeCommandBridge: /forge command registered"
+    );
+}
+
+// ============================================================================
+// MODMORPHER MANAGER
+// ============================================================================
+
+bool                     ModMorpher::initialized = false;
+JavaVM*                  ModMorpher::cachedJVM   = nullptr;
+JNIEnv*                  ModMorpher::cachedEnv   = nullptr;
 std::vector<std::string> ModMorpher::loadedMods;
-
-// ============================================================================
-// MODMORPHER MANAGER - IMPLEMENTATION
-// ============================================================================
 
 bool ModMorpher::initialize(JavaVM* jvm, JNIEnv* env) {
     if (initialized) return true;
+    auto& logger = my_mod::MyMod::getInstance().getSelf().getLogger();
 
     cachedJVM = jvm;
     cachedEnv = env;
 
     JNIThreadManager::setJVM(jvm);
     BedrockSymbolResolver::initialize();
-    BlockStateMapper::loadMappings("./blockstate_mappings.json");
+    BlockStateMapper::loadMappings("");
     NativeShadowAdapter::registerNativeMethods(env, "com.example.mod");
+    ForgeEventForwarder::registerLeviLaminaHooks();
+    registerForgeCommands();
+
+    // Start async JNI worker thread
+    gJNIWorkerRunning = true;
+    gJNIWorkerThread  = std::thread(jniWorkerLoop);
 
     initialized = true;
+    logger.info("ModMorpher: fully initialized — JNI worker running");
     return true;
 }
 
 void ModMorpher::shutdown() {
     if (!initialized) return;
+    auto& logger = my_mod::MyMod::getInstance().getSelf().getLogger();
+
+    // Stop worker thread
+    gJNIWorkerRunning = false;
+    if (gJNIWorkerThread.joinable()) gJNIWorkerThread.join();
+
+    // Clean up Java class cache and global refs
+    if (cachedEnv) {
+        JavaClassCache::clear(cachedEnv);
+        for (auto ref : ForgeEventForwarder::registeredForgeListeners)
+            cachedEnv->DeleteGlobalRef(ref);
+        ForgeEventForwarder::registeredForgeListeners.clear();
+    }
 
     JNIThreadManager::detachCurrentThread();
 
     initialized = false;
-    cachedJVM = nullptr;
-    cachedEnv = nullptr;
+    cachedJVM   = nullptr;
+    cachedEnv   = nullptr;
     loadedMods.clear();
+    logger.info("ModMorpher: shutdown complete");
 }
 
 bool ModMorpher::loadForgeMod(const std::string& jarPath) {
-    if (!initialized) {
-        return false;
-    }
+    if (!initialized) return false;
+    auto& logger = my_mod::MyMod::getInstance().getSelf().getLogger();
+
+    enqueueJNICall("LoadForgeMod:" + jarPath, [jarPath, &logger](JNIEnv* env) {
+        // Build URLClassLoader for the JAR
+        jclass urlClass    = env->FindClass("java/net/URL");
+        jclass loaderClass = env->FindClass("java/net/URLClassLoader");
+        if (!urlClass || !loaderClass) {
+            logger.error("loadForgeMod: URLClassLoader unavailable");
+            return;
+        }
+        jmethodID urlCtor    = env->GetMethodID(urlClass, "<init>", "(Ljava/lang/String;)V");
+        jmethodID loaderCtor = env->GetMethodID(loaderClass, "<init>", "([Ljava/net/URL;)V");
+        jstring jpath = env->NewStringUTF(("file:" + jarPath).c_str());
+        jobject url   = env->NewObject(urlClass, urlCtor, jpath);
+        env->DeleteLocalRef(jpath);
+        jobjectArray urls = env->NewObjectArray(1, urlClass, url);
+        jobject loader    = env->NewObject(loaderClass, loaderCtor, urls);
+        env->DeleteLocalRef(urls); env->DeleteLocalRef(url);
+
+        if (!loader) { logger.error("loadForgeMod: failed to create URLClassLoader"); return; }
+
+        // Try to find and invoke the mod's main initializer
+        // Convention: mods expose a class with a static void init() method
+        jmethodID findClass = env->GetMethodID(loaderClass, "loadClass",
+                                               "(Ljava/lang/String;)Ljava/lang/Class;");
+        // Try common Forge mod entry point patterns
+        const char* entryPoints[] = {
+            "net.minecraftforge.fml.common.Mod",
+            "com.example.mod.ModMain",
+            "Main",
+        };
+        for (auto ep : entryPoints) {
+            jstring jep   = env->NewStringUTF(ep);
+            jobject clazz = env->CallObjectMethod(loader, findClass, jep);
+            env->DeleteLocalRef(jep);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); continue; }
+            if (clazz) {
+                logger.info("loadForgeMod: found entry point -> " + std::string(ep));
+                env->DeleteLocalRef(clazz);
+                break;
+            }
+        }
+        env->DeleteLocalRef(loader);
+        logger.info("loadForgeMod: JAR staged -> " + jarPath);
+    });
 
     loadedMods.push_back(jarPath);
     return true;
@@ -552,19 +1126,12 @@ bool ModMorpher::loadForgeMod(const std::string& jarPath) {
 
 bool ModMorpher::unloadForgeMod(const std::string& modId) {
     auto it = std::find(loadedMods.begin(), loadedMods.end(), modId);
-    if (it != loadedMods.end()) {
-        loadedMods.erase(it);
-        return true;
-    }
-    return false;
+    if (it == loadedMods.end()) return false;
+    loadedMods.erase(it);
+    return true;
 }
 
-std::vector<std::string> ModMorpher::getLoadedMods() {
-    return loadedMods;
-}
+std::vector<std::string> ModMorpher::getLoadedMods()  { return loadedMods; }
+bool                     ModMorpher::isInitialized()   { return initialized; }
 
-bool ModMorpher::isInitialized() {
-    return initialized;
-}
-
-}  // namespace modmorpher
+} // namespace modmorpher
