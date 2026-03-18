@@ -22,7 +22,6 @@ jobs:
       - name: Install xmake
         run: |
           choco install xmake -y
-          refreshenv
       
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -30,11 +29,13 @@ jobs:
           arch: x64
       
       - name: Configure xmake
+        shell: cmd
         run: |
-          xmake f -p windows -a x86_64 --target_type=${{ matrix.target_type }} -m ${{ matrix.build_mode }} -y
+          C:\ProgramData\chocolatey\bin\xmake.exe f -p windows -a x86_64 --target_type=${{ matrix.target_type }} -m ${{ matrix.build_mode }} -y
       
       - name: Build mod
-        run: xmake
+        shell: cmd
+        run: C:\ProgramData\chocolatey\bin\xmake.exe
       
       - name: List build output
         run: |
