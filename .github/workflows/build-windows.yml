@@ -32,12 +32,14 @@ jobs:
           & "$env:TEMP\xmake-installer.exe" /S /D="$env:ProgramFiles\xmake"
       
       - name: Configure and Build
+        shell: cmd
         run: |
           set PATH=%ProgramFiles%\xmake;%PATH%
           xmake f -p windows -a x86_64 --target_type=${{ matrix.target_type }} -m ${{ matrix.build_mode }} -y
           xmake
       
       - name: List build output
+        shell: cmd
         run: |
           dir build\windows\x86_64\${{ matrix.build_mode }}\
           dir build\windows\x86_64\${{ matrix.build_mode }}\*.dll
