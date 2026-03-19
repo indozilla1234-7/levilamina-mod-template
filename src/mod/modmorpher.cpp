@@ -45,7 +45,7 @@
 #include "mc/nbt/CompoundTag.h"
 #include "mc/world/actor/Actor.h"
 #include "mc/world/actor/ActorDamageSource.h"
-#include "mc/world/actor/EntityContext.h"
+#include "mc/deps/ecs/gamerefs_entity/EntityContext.h"
 #include "mc/world/actor/player/Player.h"
 #include "mc/world/level/BlockSource.h"
 #include "mc/world/level/Dimension.h"
