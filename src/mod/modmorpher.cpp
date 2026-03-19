@@ -23,7 +23,7 @@
 #include "ll/api/event/player/PlayerChatEvent.h"
 #include "ll/api/event/player/PlayerDieEvent.h"
 #include "ll/api/event/player/PlayerDisconnectEvent.h"
-#include "ll/api/event/PlayerInteractBlockEvent.h"
+#include "ll/api/event/player/PlayerInteractBlockEvent.h"
 #include "ll/api/event/PlayerJoinEvent.h"
 #include "ll/api/event/PlayerPickUpItemEvent.h"
 #include "ll/api/event/PlayerPlaceBlockEvent.h"
