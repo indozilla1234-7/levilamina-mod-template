@@ -13,36 +13,29 @@
 #include <thread>
 #include <vector>
 
-#include "jni.h"
-
-namespace ll {
-    namespace api {
-        class Logger;
-    }
-}
+#include <jni.h>
 
 namespace mc {
-    namespace world {
-        namespace actor {
-            class Actor;
-            namespace player {
-                class Player;
-            }
-        }
-        namespace level {
-            class Level;
-            class BlockSource;
-            namespace block {
-                class Block;
-            }
-        }
+namespace world {
+namespace actor {
+    class Actor;
+    namespace player {
+        class Player;
     }
+}
+namespace level {
+    class Level;
+    namespace block {
+        class Block;
+    }
+}
+}
 }
 
 namespace modmorpher {
 
 // ============================================================================
-// Simple Vec3 / BlockPos helpers
+// Basic helper structs
 // ============================================================================
 struct Vec3 {
     float x, y, z;
@@ -53,11 +46,11 @@ struct BlockPos {
 };
 
 // ============================================================================
-// JNI thread manager
+// JNI Thread Manager
 // ============================================================================
 class JNIThreadManager {
 public:
-    static void   setJVM(JavaVM* vm);
+    static void setJVM(JavaVM* vm);
     static JNIEnv* getEnv();
 
     class ThreadGuard {
@@ -70,15 +63,15 @@ public:
     };
 
 private:
-    static bool   ensureAttached();
-    static void   detachCurrentThread();
+    static bool ensureAttached();
+    static void detachCurrentThread();
 
     static JavaVM*              jvm;
     static thread_local JNIEnv* threadEnv;
 };
 
 // ============================================================================
-// Bedrock symbol resolver
+// Bedrock Symbol Resolver
 // ============================================================================
 class BedrockSymbolResolver {
 public:
@@ -87,7 +80,6 @@ public:
     using BlockSetType      = bool(*)(void*, int, int, int, void*);
     using ActorAddTag       = void(*)(void*, std::string const&);
     using ActorSetAttribute = void(*)(void*, void const&, float);
-    using CommandExecute    = void(*)(mc::world::level::Level&, std::string const&, class CommandOutput&);
     using BlockCreate       = void*(*)(char const*);
 
     static bool initialize();
@@ -98,7 +90,6 @@ public:
     static BlockSetType      getBlockSetType();
     static ActorAddTag       getActorAddTag();
     static ActorSetAttribute getActorSetAttribute();
-    static CommandExecute    getCommandExecute();
     static BlockCreate       getBlockCreate();
 
 private:
@@ -107,13 +98,12 @@ private:
     static BlockSetType      blockSetType;
     static ActorAddTag       actorAddTag;
     static ActorSetAttribute actorSetAttribute;
-    static CommandExecute    commandExecute;
     static BlockCreate       blockCreate;
     static bool              resolved;
 };
 
 // ============================================================================
-// Block state mapper
+// Block State Mapper
 // ============================================================================
 class BlockStateMapper {
 public:
@@ -127,18 +117,18 @@ public:
         std::map<std::string, std::string> properties;
     };
 
-    static bool              loadMappings(std::string const& path);
-    static std::string       mapBlockName(std::string const& forgeName);
+    static bool loadMappings(std::string const& path);
+    static std::string mapBlockName(std::string const& forgeName);
     static BedrockBlockState forgeToBedrockBlockState(ForgeBlockState const& fs);
     static ForgeBlockState   bedrockToForgeBlockState(BedrockBlockState const& bs);
 
 private:
-    static std::map<std::string, std::string>                       blockNameMappings;
+    static std::map<std::string, std::string> blockNameMappings;
     static std::map<std::string, std::map<std::string, std::string>> propertyMappings;
 };
 
 // ============================================================================
-// Entity tracker
+// Entity Tracker
 // ============================================================================
 class EntityTracker {
 public:
@@ -157,7 +147,7 @@ private:
 };
 
 // ============================================================================
-// Native shadow adapter
+// Native Shadow Adapter
 // ============================================================================
 class NativeShadowAdapter {
 public:
@@ -176,11 +166,11 @@ private:
 };
 
 // ============================================================================
-// Bedrock pointer helper
+// Bedrock Pointer Helper
 // ============================================================================
 class BedrockPointerHelper {
 public:
-    static Vec3        makeVec3(double x, double y, double z);
+    static Vec3         makeVec3(double x, double y, double z);
     static jdoubleArray vec3ToJDoubleArray(JNIEnv* env, Vec3 const& v);
 
     static BlockPos extractBlockPos(JNIEnv* env, jobject obj);
@@ -188,7 +178,7 @@ public:
 };
 
 // ============================================================================
-// Forge event forwarder
+// Forge Event Forwarder
 // ============================================================================
 class ForgeEventForwarder {
 public:
@@ -209,10 +199,19 @@ private:
 };
 
 // ============================================================================
-// Global JNI queue helpers
+// JNI Queue Helpers
 // ============================================================================
 void enqueueJNICall(std::string desc, std::function<void(JNIEnv*)> fn);
 void startJNIWorker();
 void stopJNIWorker();
+
+// ============================================================================
+// Public Mod Entry Points (used by MyMod.cpp)
+// ============================================================================
+class ModMorpher {
+public:
+    static void initialize();
+    static void shutdown();
+};
 
 } // namespace modmorpher
