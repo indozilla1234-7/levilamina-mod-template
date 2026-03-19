@@ -122,7 +122,7 @@ bool BedrockSymbolResolver::initialize() {
 
     int ok = 0;
     for (auto& s : symbols) {
-        *s.target = ll::memory::resolveSymbol<void*>(s.name);
+        *s.target = reinterpret_cast<void*>(ll::memory::resolveSymbol(s.name));
         if (*s.target) { ok++; logger.info("  [OK] " + std::string(s.name)); }
         else           logger.warn("  [!!] " + std::string(s.name));
     }
@@ -133,7 +133,7 @@ bool BedrockSymbolResolver::initialize() {
 }
 
 void* BedrockSymbolResolver::resolveSymbol(const char* n) {
-    return ll::memory::resolveSymbol<void*>(n);
+    return reinterpret_cast<void*>(ll::memory::resolveSymbol(n));
 }
 
 BedrockSymbolResolver::ActorSetPos       BedrockSymbolResolver::getActorSetPos()       { return actorSetPos; }
@@ -548,6 +548,7 @@ void JNICALL NativeShadowAdapter::nativeEntitySetPos(JNIEnv* env, jobject entity
     auto fn = BedrockSymbolResolver::getActorSetPos();
     if (!fn) return;
 // FIXED:     ::Vec3 v = BedrockPointerHelper::makeVec3(x, y, z);
+    ::Vec3 v = BedrockPointerHelper::makeVec3(x, y, z);
     fn(actor, &v);
 }
 
@@ -600,7 +601,7 @@ jobject JNICALL NativeShadowAdapter::nativeItemUse(JNIEnv*, jobject, jobject, jo
 // BEDROCK POINTER HELPER
 // ============================================================================
 
-// FIXED: ::Vec3 BedrockPointerHelper::makeVec3(double x, double y, double z) {
+::Vec3 BedrockPointerHelper::makeVec3(double x, double y, double z) {
     return {(float)x, (float)y, (float)z};
 }
 
@@ -695,7 +696,7 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
     // --- Player Die ---
     bus.emplaceListener<PlayerDieEvent>([](PlayerDieEvent& ev) {
         std::string uuid  = ev.self().getUuid().asString();
-        std::string cause = std::to_string((int)ev.source().getCause());
+        std::string cause = std::to_string((int)ev.source().cause());
         fireJavaBridge("PlayerDie", [uuid, cause](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
                               "onPlayerDeath", "(Ljava/lang/String;Ljava/lang/String;)V");
@@ -738,8 +739,8 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
     // --- Player Interact Block ---
     bus.emplaceListener<PlayerInteractBlockEvent>([](PlayerInteractBlockEvent& ev) {
         std::string uuid  = ev.self().getUuid().asString();
-        auto        pos   = ev.getBlockPos();
-        auto*       blk   = ev.getBlock();
+        auto        pos   = ev.blockPos();
+        auto*       blk   = &ev.block();
         std::string block = blk ? blk->getTypeName() : "air";
         int x = (int)pos.x;
         int y = (int)pos.y;
@@ -796,7 +797,7 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
     // --- Block Place ---
     bus.emplaceListener<PlayerPlaceBlockEvent>([](PlayerPlaceBlockEvent& ev) {
         auto  pos  = ev.pos();
-        auto* blk  = ev.getBlock();
+        auto* blk  = &ev.block();
         std::string uuid  = ev.self().getUuid().asString();
         std::string block = blk ? blk->getTypeName() : "air";
         forwardBlockPlaceEvent((int)pos.x, (int)pos.y, (int)pos.z, block, uuid);
@@ -818,7 +819,7 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
     bus.emplaceListener<ActorHurtEvent>([](ActorHurtEvent& ev) {
         std::string type  = ev.self().getTypeName();
         float       dmg   = ev.damage();
-        std::string cause = std::to_string((int)ev.source().getCause());
+        std::string cause = std::to_string((int)ev.source().cause());
         fireJavaBridge("EntityHurt", [type, dmg, cause](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
                               "onEntityHurt", "(Ljava/lang/String;FLjava/lang/String;)V");
@@ -833,7 +834,7 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
     // --- Mob Die ---
     bus.emplaceListener<MobDieEvent>([](MobDieEvent& ev) {
         std::string type  = ev.self().getTypeName();
-        std::string cause = std::to_string((int)ev.source().getCause());
+        std::string cause = std::to_string((int)ev.source().cause());
         fireJavaBridge("EntityDie", [type, cause](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
                               "onEntityDeath", "(Ljava/lang/String;Ljava/lang/String;)V");
