@@ -6,6 +6,9 @@
 #include <functional>
 #include <vector>
 
+// Make Vec3 visible everywhere this header is included
+#include "mc/math/vector/Vecs.h"
+
 namespace modmorpher {
 
 // ============================================================================
@@ -102,11 +105,11 @@ private:
 
 class EntityTracker {
 public:
-    static void   registerEntity(JNIEnv* env, jobject javaEntity, void* bedrockActor);
-    static void*  getBedrockActor(JNIEnv* env, jobject javaEntity);
+    static void    registerEntity(JNIEnv* env, jobject javaEntity, void* bedrockActor);
+    static void*   getBedrockActor(JNIEnv* env, jobject javaEntity);
     static jobject getJavaEntity(void* bedrockActor);
-    static void   unregisterEntity(JNIEnv* env, jobject javaEntity);
-    static bool   hasEntity(JNIEnv* env, jobject javaEntity);
+    static void    unregisterEntity(JNIEnv* env, jobject javaEntity);
+    static bool    hasEntity(JNIEnv* env, jobject javaEntity);
 
 private:
     static jlong getEntityId(JNIEnv* env, jobject javaEntity);
@@ -146,8 +149,9 @@ class BedrockPointerHelper {
 public:
     struct BlockPos { int x, y, z; };
 
-    static ::Vec3 makeVec3(double x, double y, double z);
-    static jdoubleArray vec3ToJDoubleArray(JNIEnv* env, const ::Vec3& vec);
+    // Use Bedrock's Vec3
+    static Vec3 makeVec3(double x, double y, double z);
+    static jdoubleArray vec3ToJDoubleArray(JNIEnv* env, const Vec3& vec);
 
     static BlockPos extractBlockPos(JNIEnv* env, jobject blockPosObj);
     static jobject createBlockPos(JNIEnv* env, int x, int y, int z);
