@@ -12,10 +12,10 @@
 #include "mod/MyMod.h"
 
 // LeviLamina
-#include "ll/api/command/Command.h"
-#include "ll/api/command/CommandHandle.h"
-#include "ll/api/command/CommandOutput.h"
-#include "ll/api/command/CommandRegistrar.h"
+#include "ll/api/server/command/Command.h"
+#include "ll/api/server/command/CommandHandle.h"
+#include "ll/api/server/command/CommandOutput.h"
+#include "ll/api/server/command/CommandRegistrar.h"
 #include "ll/api/event/EventBus.h"
 #include "ll/api/event/entity/ActorHurtEvent.h"
 #include "ll/api/event/entity/MobDieEvent.h"
