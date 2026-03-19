@@ -23,13 +23,15 @@ public:
     using ActorAddTag       = void(*)(void* actor, const char* tag);
     using ActorSetAttribute = void(*)(void* actor, const void* attribute, float value);
     using CommandExecute    = int(*)(void* level, const char* command);
-    using BlockCreate       = void*(*)(const char* blockName);
+    using BlockCreate        = void*(*)(const char* blockName);
+    using DimensionGetBlock  = const ::Block*(*)(::BlockSource*, const ::BlockPos&);
 
     static bool initialize();
 
     static ActorSetPos       getActorSetPos();
     static ActorGetPos       getActorGetPos();
     static BlockSetType      getBlockSetType();
+    static DimensionGetBlock getDimensionGetBlock();
     static ActorAddTag       getActorAddTag();
     static ActorSetAttribute getActorSetAttribute();
     static CommandExecute    getCommandExecute();
@@ -41,6 +43,7 @@ private:
     static ActorSetPos       actorSetPos;
     static ActorGetPos       actorGetPos;
     static BlockSetType      blockSetType;
+    static DimensionGetBlock dimensionGetBlock;
     static ActorAddTag       actorAddTag;
     static ActorSetAttribute actorSetAttribute;
     static CommandExecute    commandExecute;
@@ -150,8 +153,8 @@ public:
     struct BlockPos { int x, y, z; };
 
     // Use Bedrock's Vec3
-// FIXED:     static Vec3 makeVec3(double x, double y, double z);
-    static jdoubleArray vec3ToJDoubleArray(JNIEnv* env, const Vec3& vec);
+    static ::Vec3 makeVec3(double x, double y, double z);
+    static jdoubleArray vec3ToJDoubleArray(JNIEnv* env, const ::Vec3& vec);
 
     static BlockPos extractBlockPos(JNIEnv* env, jobject blockPosObj);
     static jobject createBlockPos(JNIEnv* env, int x, int y, int z);
@@ -185,6 +188,7 @@ private:
     static std::vector<PlayerEventHandler> playerLeaveHandlers;
     static std::vector<BlockEventHandler>  blockBreakHandlers;
     static std::vector<BlockEventHandler>  blockPlaceHandlers;
+    static std::vector<jobject>            registeredForgeListeners;
 };
 
 // ============================================================================
