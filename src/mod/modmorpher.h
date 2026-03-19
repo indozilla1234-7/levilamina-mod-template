@@ -13,7 +13,7 @@
 #include <thread>
 #include <vector>
 
-#include "jni.h"
+#include <jni.h>
 
 namespace mc {
 namespace world {
@@ -76,7 +76,7 @@ private:
 class BedrockSymbolResolver {
 public:
     using ActorSetPos       = void(*)(void*, Vec3 const*);
-    using ActorGetPos       = Vec3 const&(*)(void*, Vec3*);
+    using ActorGetPos       = Vec3*(*)(void*, Vec3*);          // FIXED — no references
     using BlockSetType      = bool(*)(void*, int, int, int, void*);
     using ActorAddTag       = void(*)(void*, std::string const&);
     using ActorSetAttribute = void(*)(void*, void const&, float);
@@ -210,7 +210,7 @@ void stopJNIWorker();
 // ============================================================================
 class ModMorpher {
 public:
-    static void initialize();
+    static bool initialize(JavaVM* vm, JNIEnv* env);   // FIXED — matches MyMod.cpp
     static void shutdown();
 };
 
