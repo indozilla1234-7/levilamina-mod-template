@@ -12,7 +12,7 @@
 #include "mod/MyMod.h"
 
 // LeviLamina
-#include "ll/api/server/command/Command.h"
+#include "ll/api/command/Command.h"
 #include "ll/api/server/command/CommandHandle.h"
 #include "ll/api/server/command/CommandOutput.h"
 #include "ll/api/server/command/CommandRegistrar.h"
