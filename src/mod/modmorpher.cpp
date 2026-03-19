@@ -114,7 +114,7 @@ void modmorpher::stopJNIWorker() {
 std::vector<jobject> ForgeEventForwarder::registeredListeners;
 
 void ForgeEventForwarder::init() {
-    // No Java listeners yet — safe to leave empty
+    // No Java listeners yet
 }
 
 void ForgeEventForwarder::shutdown() {
@@ -129,7 +129,7 @@ void ForgeEventForwarder::shutdown() {
 }
 
 void ForgeEventForwarder::forwardActorHurt(mc::world::actor::Actor& actor, int damage) {
-    // Stub — user will implement Java side later
+    // Stub for Java bridge
 }
 
 void ForgeEventForwarder::forwardPlayerDeath(mc::world::actor::player::Player& player) {
@@ -156,7 +156,6 @@ bool ModMorpher::initialize(JavaVM* vm, JNIEnv* env) {
 
     auto& bus = ll::event::EventBus::getInstance();
 
-    // Actor hurt
     bus.emplaceListener<ll::event::entity::ActorHurtEvent>(
         [](ll::event::entity::ActorHurtEvent& ev) {
             if (auto* actor = ev.getActor()) {
@@ -165,7 +164,6 @@ bool ModMorpher::initialize(JavaVM* vm, JNIEnv* env) {
         }
     );
 
-    // Player death
     bus.emplaceListener<ll::event::player::PlayerDieEvent>(
         [](ll::event::player::PlayerDieEvent& ev) {
             if (auto* p = ev.getPlayer()) {
@@ -174,7 +172,6 @@ bool ModMorpher::initialize(JavaVM* vm, JNIEnv* env) {
         }
     );
 
-    // Mob death
     bus.emplaceListener<ll::event::entity::MobDieEvent>(
         [](ll::event::entity::MobDieEvent& ev) {
             if (auto* m = ev.getMob()) {
@@ -183,7 +180,6 @@ bool ModMorpher::initialize(JavaVM* vm, JNIEnv* env) {
         }
     );
 
-    // Block break
     bus.emplaceListener<ll::event::player::PlayerDestroyBlockEvent>(
         [](ll::event::player::PlayerDestroyBlockEvent& ev) {
             if (auto* p = ev.getPlayer()) {
@@ -194,7 +190,6 @@ bool ModMorpher::initialize(JavaVM* vm, JNIEnv* env) {
         }
     );
 
-    // Chat
     bus.emplaceListener<ll::event::player::PlayerChatEvent>(
         [](ll::event::player::PlayerChatEvent& ev) {
             if (auto* p = ev.getPlayer()) {
@@ -203,7 +198,6 @@ bool ModMorpher::initialize(JavaVM* vm, JNIEnv* env) {
         }
     );
 
-    // Join
     bus.emplaceListener<ll::event::player::PlayerJoinEvent>(
         [](ll::event::player::PlayerJoinEvent& ev) {
             if (auto* p = ev.getPlayer()) {
