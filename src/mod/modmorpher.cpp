@@ -542,7 +542,7 @@ void JNICALL NativeShadowAdapter::nativeEntitySetPos(JNIEnv* env, jobject entity
     if (!actor) return;
     auto fn = BedrockSymbolResolver::getActorSetPos();
     if (!fn) return;
-    ::Vec3 v = BedrockPointerHelper::makeVec3(x, y, z);
+// FIXED:     ::Vec3 v = BedrockPointerHelper::makeVec3(x, y, z);
     fn(actor, &v);
 }
 
@@ -595,7 +595,7 @@ jobject JNICALL NativeShadowAdapter::nativeItemUse(JNIEnv*, jobject, jobject, jo
 // BEDROCK POINTER HELPER
 // ============================================================================
 
-::Vec3 BedrockPointerHelper::makeVec3(double x, double y, double z) {
+// FIXED: ::Vec3 BedrockPointerHelper::makeVec3(double x, double y, double z) {
     return {(float)x, (float)y, (float)z};
 }
 

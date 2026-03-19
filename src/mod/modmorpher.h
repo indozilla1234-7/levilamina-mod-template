@@ -150,7 +150,7 @@ public:
     struct BlockPos { int x, y, z; };
 
     // Use Bedrock's Vec3
-    static Vec3 makeVec3(double x, double y, double z);
+// FIXED:     static Vec3 makeVec3(double x, double y, double z);
     static jdoubleArray vec3ToJDoubleArray(JNIEnv* env, const Vec3& vec);
 
     static BlockPos extractBlockPos(JNIEnv* env, jobject blockPosObj);
