@@ -13,7 +13,7 @@
 #include <thread>
 #include <vector>
 
-#include <jni.h>
+#include "jni.h"
 
 namespace ll {
     namespace api {
