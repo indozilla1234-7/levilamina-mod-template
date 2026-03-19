@@ -1,6 +1,6 @@
 #pragma once
 
-#include <jni.h>
+#include "jni.h"
 #include <string>
 #include <map>
 #include <memory>
