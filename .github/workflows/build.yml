@@ -1,42 +1,90 @@
+name: Build Windows DLL
+ 
 on:
-  pull_request:
   push:
-  workflow_dispatch:
-  
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual trigger
+
 jobs:
   build:
     runs-on: windows-latest
+    
     strategy:
       matrix:
-        target_type:
-          - server
-          - client
+        target_type: [server, client]
+        build_mode: [release]
+    
     steps:
-      - uses: actions/checkout@v6
-
-      - uses: xmake-io/github-action-setup-xmake@v1
-        # with:
-        #   xmake-version: branch@master
+      - uses: actions/checkout@v4
       
-      - uses: actions/cache@v5
+      - name: Setup MSVC and Build
+        uses: ilammy/msvc-dev-cmd@v1
         with:
-          path: |
-            ~/AppData/Local/.xmake
-          key: xmake-${{ hashFiles('xmake.lua') }}
-          restore-keys: |
-            xmake-
-
-      - run: |
-          xmake repo -u
-
-      - run: |
-          xmake f -a x64 -m release -p windows -v --target_type=${{ matrix.target_type }} -y
-
-      - run: |
-          xmake -v -y
-
-      - uses: actions/upload-artifact@v7
+          arch: x64
+      
+      - name: Install xmake
+        shell: powershell
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri "https://github.com/xmake-io/xmake/releases/download/v3.0.7/xmake-v3.0.7.win64.exe" -OutFile "$env:TEMP\xmake-installer.exe"
+          & "$env:TEMP\xmake-installer.exe" /S /D="$env:ProgramFiles\xmake"
+          Add-Content $env:GITHUB_PATH "$env:ProgramFiles\xmake"
+      
+      - name: Configure and Build
+        shell: cmd
+        run: |
+          xmake global --clean
+          xmake f -p windows -a x86_64 --target_type=${{ matrix.target_type }} -m ${{ matrix.build_mode }} -y
+          xmake -y
+      
+      - name: List build output
+        shell: cmd
+        run: |
+          dir build\windows\x86_64\${{ matrix.build_mode }}\
+          dir build\windows\x86_64\${{ matrix.build_mode }}\*.dll
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.repository.name }}-${{ github.sha }}-${{ matrix.target_type }}-windows-x64
-          path: |
-            bin/
+          name: levilamina-mod-${{ matrix.target_type }}-${{ matrix.build_mode }}
+          path: build/windows/x86_64/${{ matrix.build_mode }}/*.dll
+          if-no-files-found: warn
+      
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            build/windows/x86_64/${{ matrix.build_mode }}/*.dll
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-linux:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install xmake
+        run: |
+          curl -fsSL https://xmake.io/shget.text | bash
+      
+      - name: Configure xmake for Linux
+        run: |
+          xmake f -p linux -a x86_64 --target_type=server -m release -y
+      
+      - name: Build mod
+        run: xmake
+      
+      - name: List build output
+        run: |
+          find build -name "*.so" -o -name "*.a"
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: levilamina-mod-linux
+          path: build/linux/x86_64/release/
+          if-no-files-found: warn
