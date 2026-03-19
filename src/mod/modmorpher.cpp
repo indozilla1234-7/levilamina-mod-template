@@ -14,7 +14,7 @@
 // LeviLamina
 #include "ll/api/command/Command.h"
 #include "ll/api/command/CommandHandle.h"
-#include "ll/api/server/commands/CommandOutput.h"
+#include "ll/mc/server/commands/CommandOutput.h"
 #include "ll/api/command/CommandRegistrar.h"
 #include "ll/api/event/EventBus.h"
 #include "ll/api/event/entity/ActorHurtEvent.h"
