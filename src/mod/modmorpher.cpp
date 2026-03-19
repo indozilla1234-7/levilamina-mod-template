@@ -547,8 +547,8 @@ void JNICALL NativeShadowAdapter::nativeEntitySetPos(JNIEnv* env, jobject entity
     if (!actor) return;
     auto fn = BedrockSymbolResolver::getActorSetPos();
     if (!fn) return;
-// FIXED:     ::Vec3 v = BedrockPointerHelper::makeVec3(x, y, z);
-    ::Vec3 v = BedrockPointerHelper::makeVec3(x, y, z);
+// FIXED:     Vec3 v = BedrockPointerHelper::makeVec3(x, y, z);
+    Vec3 v = BedrockPointerHelper::makeVec3(x, y, z);
     fn(actor, &v);
 }
 
@@ -557,7 +557,7 @@ jobject JNICALL NativeShadowAdapter::nativeEntityGetPos(JNIEnv* env, jobject ent
     if (!actor) return nullptr;
     auto fn = BedrockSymbolResolver::getActorGetPos();
     if (!fn) return nullptr;
-    ::Vec3 v{0,0,0};
+    Vec3 v{0,0,0};
     fn(actor, &v);
     return BedrockPointerHelper::vec3ToJDoubleArray(env, v);
 }
@@ -601,11 +601,11 @@ jobject JNICALL NativeShadowAdapter::nativeItemUse(JNIEnv*, jobject, jobject, jo
 // BEDROCK POINTER HELPER
 // ============================================================================
 
-::Vec3 BedrockPointerHelper::makeVec3(double x, double y, double z) {
+Vec3 BedrockPointerHelper::makeVec3(double x, double y, double z) {
     return {(float)x, (float)y, (float)z};
 }
 
-jdoubleArray BedrockPointerHelper::vec3ToJDoubleArray(JNIEnv* env, const ::Vec3& v) {
+jdoubleArray BedrockPointerHelper::vec3ToJDoubleArray(JNIEnv* env, const Vec3& v) {
     jdoubleArray a = env->NewDoubleArray(3);
     jdouble d[] = {v.x, v.y, v.z};
     env->SetDoubleArrayRegion(a, 0, 3, d);
