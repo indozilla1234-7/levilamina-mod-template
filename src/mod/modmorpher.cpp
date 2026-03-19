@@ -1,3 +1,8 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <format>
+#include <string>
 #include "modmorpher.h"
 #include "mod/MyMod.h"
 #include <algorithm>
