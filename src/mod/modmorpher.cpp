@@ -28,7 +28,7 @@
 #include "ll/api/event/player/PlayerPickUpItemEvent.h"
 #include "ll/api/event/PlayerPlaceBlockEvent.h"
 #include "ll/api/event/player/PlayerRespawnEvent.h"
-#include "ll/api/event/PlayerBreakBlockEvent.h"
+#include "ll/api/event/player/PlayerBreakBlockEvent.h"
 #include "ll/api/event/world/LevelTickEvent.h"
 #include "ll/api/event/world/SpawnMobEvent.h"
 #include "ll/api/event/server/ServerStartedEvent.h"
