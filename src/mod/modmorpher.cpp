@@ -2,19 +2,16 @@
 #define NOMINMAX
 #endif
 
-#include <format>
-#include <string>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
-#include <sstream>
+#include <format>
 #include <fstream>
-#include <thread>
 #include <mutex>
 #include <queue>
-#include <atomic>
-#include <map>
-#include <vector>
-#include <functional>
+#include <sstream>
+#include <string>
+#include <thread>
 
 #include "modmorpher.h"
 #include "mod/MyMod.h"
@@ -22,34 +19,38 @@
 // ============================================================================
 // LEVILAMINA INCLUDES
 // ============================================================================
+#include "ll/api/command/Command.h"
+#include "ll/api/command/CommandHandle.h"
+#include "ll/api/command/CommandRegistrar.h"
 #include "ll/api/event/EventBus.h"
-#include "ll/api/event/player/PlayerJoinEvent.h"
-#include "ll/api/event/player/PlayerDisconnectEvent.h"
-#include "ll/api/event/player/PlayerDestroyBlockEvent.h"
-#include "ll/api/event/player/PlayerPlaceBlockEvent.h"
+#include "ll/api/event/entity/ActorHurtEvent.h"
+#include "ll/api/event/entity/MobDieEvent.h"
 #include "ll/api/event/player/PlayerAttackEvent.h"
 #include "ll/api/event/player/PlayerChatEvent.h"
 #include "ll/api/event/player/PlayerDieEvent.h"
-#include "ll/api/event/player/PlayerRespawnEvent.h"
+#include "ll/api/event/player/PlayerDisconnectEvent.h"
 #include "ll/api/event/player/PlayerInteractBlockEvent.h"
+#include "ll/api/event/player/PlayerJoinEvent.h"
 #include "ll/api/event/player/PlayerPickUpItemEvent.h"
-#include "ll/api/event/entity/MobDieEvent.h"
-#include "ll/api/event/entity/ActorHurtEvent.h"
-#include "ll/api/event/world/SpawnMobEvent.h"
+#include "ll/api/event/player/PlayerPlaceBlockEvent.h"
+#include "ll/api/event/player/PlayerRespawnEvent.h"
 #include "ll/api/event/world/LevelTickEvent.h"
+#include "ll/api/event/world/SpawnMobEvent.h"
 #include "ll/api/event/server/ServerStartedEvent.h"
 #include "ll/api/event/server/ServerStoppingEvent.h"
 #include "ll/api/memory/Hook.h"
 #include "ll/api/memory/Memory.h"
 #include "ll/api/memory/Symbol.h"
-#include "ll/api/command/CommandHandle.h"
-#include "ll/api/command/CommandRegistrar.h"
 
-#include "mc/world/actor/player/Player.h"
-#include "mc/world/level/block/Block.h"
-#include "mc/world/level/BlockSource.h"
-#include "mc/world/level/Level.h"
 #include "mc/nbt/CompoundTag.h"
+#include "mc/world/actor/Actor.h"
+#include "mc/world/actor/ActorDamageSource.h"
+#include "mc/world/actor/EntityContext.h"
+#include "mc/world/actor/player/Player.h"
+#include "mc/world/level/BlockSource.h"
+#include "mc/world/level/Dimension.h"
+#include "mc/world/level/Level.h"
+#include "mc/world/level/block/Block.h"
 
 namespace modmorpher {
 
@@ -128,9 +129,8 @@ bool BedrockSymbolResolver::initialize() {
 
     int ok = 0;
     for (auto& s : symbols) {
-        // NOTE: Adjust this to match ll::memory::Symbol API in your version if needed.
-        ll::memory::Symbol sym{s.name};
-        *s.target = sym.resolve();
+        ll::memory::Symbol sym{std::string{s.name}};
+        *s.target = sym.view().resolve(true);
         if (*s.target) { ok++; logger.info("  [OK] " + std::string(s.name)); }
         else           logger.warn("  [!!] " + std::string(s.name));
     }
@@ -141,8 +141,8 @@ bool BedrockSymbolResolver::initialize() {
 }
 
 void* BedrockSymbolResolver::resolveSymbol(const char* n) {
-    ll::memory::Symbol sym{n};
-    return sym.resolve();
+    ll::memory::Symbol sym{std::string{n}};
+    return sym.view().resolve(true);
 }
 
 BedrockSymbolResolver::ActorSetPos       BedrockSymbolResolver::getActorSetPos()       { return actorSetPos; }
@@ -704,7 +704,8 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
     // --- Player Die ---
     bus.emplaceListener<PlayerDieEvent>([](PlayerDieEvent& ev) {
         std::string uuid  = ev.self().getUuid().asString();
-        std::string cause = std::to_string((int)ev.source().getCause());
+        auto        causeEnum = ev.source().mCause.value();
+        std::string cause = std::to_string(static_cast<int>(causeEnum));
         fireJavaBridge("PlayerDie", [uuid, cause](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
                               "onPlayerDeath", "(Ljava/lang/String;Ljava/lang/String;)V");
@@ -748,8 +749,8 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
     bus.emplaceListener<PlayerInteractBlockEvent>([](PlayerInteractBlockEvent& ev) {
         std::string uuid  = ev.self().getUuid().asString();
         auto        pos   = ev.blockPos();
-        auto&       blk   = ev.block();
-        std::string block = blk.getTypeName();
+        auto        blk   = ev.block(); // optional_ref<const Block>
+        std::string block = blk ? blk->getTypeName() : "air";
         int x = (int)pos.x;
         int y = (int)pos.y;
         int z = (int)pos.z;
@@ -781,13 +782,17 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
 
     // --- Block Break ---
     bus.emplaceListener<PlayerDestroyBlockEvent>([](PlayerDestroyBlockEvent& ev) {
-        auto  pos  = ev.pos();
-        auto& pl   = ev.self();
-        std::string uuid  = pl.getUuid().asString();
+        auto  pos   = ev.mBlockPos.value();
+        auto  blkPn = ev.mBlock.value();
+        auto* blk   = blkPn.get();
+        std::string block = blk ? blk->getTypeName() : "unknown";
 
-        // Avoid Dimension type issues: use BlockSource directly from player
-        auto& bs  = pl.getBlockSource();
-        std::string block = bs.getBlock(pos).getTypeName();
+        std::string uuid = "unknown";
+
+        auto ctxRef = ev.mPlayer.value();
+        if (auto* ctx = ctxRef.get()) {
+            // If you later wire a Player component into ECS, resolve it here.
+        }
 
         forwardBlockBreakEvent((int)pos.x, (int)pos.y, (int)pos.z, uuid);
         int x = (int)pos.x;
@@ -805,10 +810,9 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
     });
 
     // --- Block Place ---
-    bus.emplaceListener<PlayerPlaceBlockEvent>([](PlayerPlaceBlockEvent& ev) {
-        auto  pos  = ev.pos();
-        // NOTE: Adjust if your LL version exposes block differently (e.g. ev.getBlock(), ev.blockInstance(), etc.)
-        auto& blk  = ev.block();
+    bus.emplaceListener<PlayerPlacedBlockEvent>([](PlayerPlacedBlockEvent& ev) {
+        auto        pos   = ev.pos();
+        auto const& blk   = ev.placedBlock();
         std::string uuid  = ev.self().getUuid().asString();
         std::string block = blk.getTypeName();
         forwardBlockPlaceEvent((int)pos.x, (int)pos.y, (int)pos.z, block, uuid);
@@ -830,7 +834,8 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
     bus.emplaceListener<ActorHurtEvent>([](ActorHurtEvent& ev) {
         std::string type  = ev.self().getTypeName();
         float       dmg   = ev.damage();
-        std::string cause = std::to_string((int)ev.source().getCause());
+        auto        causeEnum = ev.source().mCause.value();
+        std::string cause = std::to_string(static_cast<int>(causeEnum));
         fireJavaBridge("EntityHurt", [type, dmg, cause](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
                               "onEntityHurt", "(Ljava/lang/String;FLjava/lang/String;)V");
@@ -845,7 +850,8 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
     // --- Mob Die ---
     bus.emplaceListener<MobDieEvent>([](MobDieEvent& ev) {
         std::string type  = ev.self().getTypeName();
-        std::string cause = std::to_string((int)ev.source().getCause());
+        auto        causeEnum = ev.source().mCause.value();
+        std::string cause = std::to_string(static_cast<int>(causeEnum));
         fireJavaBridge("EntityDie", [type, cause](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
                               "onEntityDeath", "(Ljava/lang/String;Ljava/lang/String;)V");
@@ -858,10 +864,9 @@ void ForgeEventForwarder::registerLeviLaminaHooks() {
     });
 
     // --- Mob Spawn ---
-    bus.emplaceListener<SpawnMobEvent>([](SpawnMobEvent& ev) {
-        // NOTE: Adjust if your LL version exposes mob differently (e.g. ev.mob, ev.entity())
-        auto& mob  = ev.getMob();
-        std::string type = mob.getTypeName();
+    bus.emplaceListener<SpawnedMobEvent>([](SpawnedMobEvent& ev) {
+        auto mobRef = ev.mob();
+        std::string type = mobRef ? mobRef->getTypeName() : "unknown";
         fireJavaBridge("MobSpawn", [type](JNIEnv* env, jclass cls) {
             jmethodID m = JavaClassCache::getStaticMethod(env, "com/example/mod/ForgeEventBridge",
                               "onMobSpawn", "(Ljava/lang/String;)V");
@@ -909,7 +914,6 @@ void ForgeEventForwarder::registerForgeEventListener(JNIEnv* env,const std::stri
     registeredForgeListeners.push_back(env->NewGlobalRef(l));
 }
 
-// helper to clear listeners safely (make sure this is declared public in modmorpher.h)
 void ForgeEventForwarder::clearListeners(JNIEnv* env) {
     for (auto ref : registeredForgeListeners) {
         env->DeleteGlobalRef(ref);
@@ -961,14 +965,8 @@ static void registerForgeCommands() {
         std::string modId;
     };
 
-    auto& registrar = CommandRegistrar::getInstance(
-        my_mod::MyMod::getInstance().getSelf()
-    );
-
-    auto& cmd = registrar.getOrCreateCommand(
-        "forge",
-        "Forge-Bedrock translator control"
-    );
+    auto& cmd = CommandRegistrar::getInstance(true)
+        .getOrCreateCommand("forge", "Forge-Bedrock translator control");
 
     cmd.overload<ForgeCmd>()
         .text("status")
