@@ -1,8 +1,10 @@
 // NOLINTBEGIN
 
+#include <format>   // required for std::formatter
+
 namespace std {
 
-// std::formatter support for ll::concepts::IsVectorBase
+// Only support char formatting (std::string / std::string_view)
 template <ll::concepts::IsVectorBase T>
 struct formatter<T, char> : std::formatter<std::string_view, char> {
     template <class FormatContext>
@@ -14,7 +16,9 @@ struct formatter<T, char> : std::formatter<std::string_view, char> {
 
 template <ll::concepts::IsVectorBase T>
 struct hash<T> {
-    constexpr size_t operator()(T const& vec) const noexcept { return vec.hash(); }
+    constexpr size_t operator()(T const& vec) const noexcept {
+        return vec.hash();
+    }
 };
 
 } // namespace std
